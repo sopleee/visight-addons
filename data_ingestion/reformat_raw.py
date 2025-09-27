@@ -4,9 +4,10 @@ import pandas as pd
 from config import Config
 from pathlib import Path
 import hashlib
+import argparse
 
-## TODO rather than writing to temp dir better to write directly to s3
-temp_dir = "./tmp"
+## TODO rather than writing to temp dir better to write directly to s3 (this is done through changing Config)
+temp_dir = "./data_ingestion/tmp"
 path = f"{temp_dir}/brand_catalogue.csv"
 Path(path).parent.mkdir(parents=True, exist_ok=True)
 CONFIG = Config()
@@ -20,7 +21,7 @@ def save_brand_catalogue(data_metadata):
     '''
     brand_names = data_metadata["names"]
     brand_df = pd.DataFrame({"id": [i for i in range(data_metadata["nc"])], "name": brand_names})
-    brand_df.to_csv(f"{temp_dir}/brand_catalogue.csv", index=False) ## TODO: make this path work with Modal volume
+    brand_df.to_csv(f"{temp_dir}/brand_catalogue.csv", index=False) ## TODO write to s3 directly instead
 
 def get_classes_in_img(parent_dir, img_name):
     '''
@@ -95,19 +96,25 @@ def save_image_and_label_catalogue(data_metadata, parent_dir):
 
 
 if __name__ == "__main__": 
-    # TODO modal volume location for raw data to be passed in as argument
-    modal_volume_location = "./F1 Logos.v8i.yolov11_sample"
-    data_yaml_path = f"{modal_volume_location}/data.yaml"
+    argparse.ArgumentParser()
+    parser = argparse.ArgumentParser(
+                    prog='reformat_raw',
+                    description='Take in raw dataset on local device, reformats and saves to s3')
+
+    parser.add_argument('-d', '--data_path')
+    args = parser.parse_args()
+
+    data_dir = args.data_path #"../F1 Logos.v8i.yolov11_sample"
+    data_yaml_path = f"{data_dir}/data.yaml"
     with open(data_yaml_path) as stream:
         try:
             data_metadata = yaml.safe_load(stream)
         except yaml.YAMLError as exc:
             raise Exception(exc)
     
-    # TODO: edit local dataset paths (include modal volume location)
     print("Saving brand catalogue..")
     save_brand_catalogue(data_metadata)
     print("Saving image and label catalogue..")
-    save_image_and_label_catalogue(data_metadata, parent_dir=modal_volume_location)
+    save_image_and_label_catalogue(data_metadata, parent_dir=data_dir)
     print("Migrating image and label raws to s3..") # TODO
 
