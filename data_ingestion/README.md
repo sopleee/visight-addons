@@ -1,0 +1,5 @@
+## Data Ingestion (first pass)
+Run reformat_raw.py in Modal. It saves data formatted according to current a2.tex into s3. 
+
+1) There is an error in the Roboflow SDK- filenames in our dataset are sometimes too long, and it causes an error. So, I currently downloaded the dataset into my local device (manually pressing continue every time a filename was too long). A sample of said dataset is included to get a sense of the dataset structure. A similar procedure will need to be repeated for ingestion using Modal. 
+2) reformat_raw.py accomplishes three things: create brand_catalogue, create image_catalogue, and bulk transfer files from Modal to s3. NOTE: the first pass is not integrated with either Modal nor s3, and is the immediate next step. Currently, all write paths are temporary and should either be passed in as arguments into the file or with the Config. 
