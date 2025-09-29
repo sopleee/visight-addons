@@ -1,7 +1,5 @@
 
 class Config:
-    s3_bucket = ""
-    image_dump_path = "."
-    label_dump_path = "."
-    image_catalogue_path = "."
-    brand_catalogue_path = "."
+    s3_bucket = "visight-data-yusufmoola"
+    raw_prefix = "raw/roboflow/v8"
+    catalogue_path = "s3://visight-data-yusufmoola/configs"

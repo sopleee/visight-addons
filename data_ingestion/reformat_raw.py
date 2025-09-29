@@ -1,51 +1,55 @@
-
-import yaml
 import pandas as pd
 from config import Config
 from pathlib import Path
 import hashlib
-import argparse
+import re
+from s3_client import s3Client
+from tqdm import tqdm
+import s3fs
 
-## TODO rather than writing to temp dir better to write directly to s3 (this is done through changing Config)
-temp_dir = "./data_ingestion/tmp"
-path = f"{temp_dir}/brand_catalogue.csv"
-Path(path).parent.mkdir(parents=True, exist_ok=True)
 CONFIG = Config()
 
-def save_brand_catalogue(data_metadata):
+def create_brand_catalogue(metadata):
     '''
-    Save brand with id
+    Create df of brand names with ids
     
     NOTE: Id is currently a monotonically increasing value, 
     but might alter or enhance approach depending on potential inclusion of different datasets in the future
     '''
-    brand_names = data_metadata["names"]
-    brand_df = pd.DataFrame({"id": [i for i in range(data_metadata["nc"])], "name": brand_names})
-    brand_df.to_csv(f"{temp_dir}/brand_catalogue.csv", index=False) ## TODO write to s3 directly instead
+    expected_keys = {"names", "nc"}
+    missing_keys = expected_keys - set(list(metadata.keys()))
+    if missing_keys:
+        raise Exception(f"Missing keys from metadata: {missing_keys}")
+    
+    brand_names = metadata["names"]
+    brand_df = pd.DataFrame({"id": [i for i in range(metadata["nc"])], "name": brand_names})
+    return brand_df
+    # brand_df.to_csv(f"{temp_dir}/brand_catalogue.csv", index=False) ## TODO write to s3 directly instead
 
-def get_classes_in_img(parent_dir, img_name):
+def get_classes_in_img(client, label_directory, image_stem):
     '''
     Finds and formats class_ids from a label file. 
-    Raises an exception if the matching label file is not found in expected location
+    Raises an exception if the matching label file is not found in expected s3 location
     '''
-    label_path = f"{parent_dir}/labels/{str(img_name)}.txt"
+    label_key = f"{label_directory}/{str(image_stem)}.txt"
     try:
-        with open(label_path, 'r') as file:
-            classes = list(set(int(line.strip().split(" ")[0]) for line in file))
-            classes.sort()
-            return classes
-    except FileNotFoundError:
-        raise Exception(f"File {label_path} not found")
-    except PermissionError:
-        raise Exception(f"Permission denied to read {label_path}")
+        label_file = client.get_object(label_key, "txt")
+        if len(label_file.replace(" ", "")) == 0:
+            return label_key, []
+        classes = list(set(int(line.strip().split(" ")[0]) for line in label_file.split("\n")))
+        classes.sort()
+        return label_key, classes
     except Exception as e:
-        raise Exception(f"Error reading file: {e}")
+        raise Exception(f"Error reading file {label_key} retrieved from s3: {e}")
 
-def save_image_and_label_catalogue(data_metadata, parent_dir):
+def create_image_catalogue(client, split_directories, images_per_split):
     '''
-    Input: parsed yaml file from dataset that gives paths to the dataset splits
+    Input: 
+    - client (s3 client)
+    - split_directories: a dictionary that maps data splits to their label directories
+    - images_per_split: a dictionary that maps data splits to a list of all images
     
-    Take all data from existing dataset splits (train, val, test) and save each image/label pair into the image catalogue
+    Take all data from existing dataset splits and save each image/label pair into the image catalogue
     An exception is thrown and catalogue doesn't save if a matching label cannot be found for an image. 
     (The same exception is not thrown if there doesn't exist a matching image to a given label file.)
     
@@ -57,6 +61,7 @@ def save_image_and_label_catalogue(data_metadata, parent_dir):
     (2) Provided labels are already in Yolo format
     
     NOTE in the future might want to add dataset versioning and naming to config or as a commandline input
+    NOTE might want to treat image files that don't have a matching label as a non-breaking warning
     
     Image catalogue: csv with columns
     - id (str): hash of image_path stem (aka without the .jpg or .png ending, irregardless of parent directory)
@@ -66,55 +71,95 @@ def save_image_and_label_catalogue(data_metadata, parent_dir):
     - split (str): one of ["train", "val", "test"]
     '''
 
-    potential_splits = ["train", "val", "test"]
+    label_directories = {k:f"{CONFIG.raw_prefix}/{v}/labels" for k, v in split_directories.items()}
     catalogue_dict = {
         "id": [], "s3_img_path":[], "s3_label_path":[], "class_ids":[], "split":[]
     }
-    for split in potential_splits: 
-        if split in data_metadata:
-            # process entire directory name
-            # TODO construct path based on Model volume location
-            split_dir = data_metadata[split].replace("/images", "").replace("../", "./")
-            full_split_dir = f"{parent_dir}/{split_dir}"
-            source_path = Path(f"{full_split_dir}/images")
+    for split in images_per_split.keys(): 
+        # for each image, confirm that a matching label exists and write it into
+        label_directory = label_directories[split]
+        print(f"\t{split} with {len(images_per_split[split])} images..")
+        for full_img_path in tqdm(images_per_split[split]):
+            # get the image stem (without directories or file type)
+            rel_path_stem = Path(full_img_path).stem
+            hashed_id = hashlib.sha256(str(rel_path_stem).encode()).hexdigest()
             
-            # process data (for each image, confirm that a matching label exists)
-            for src_file in source_path.rglob('*'):
-                rel_path = src_file.relative_to(source_path)
-                rel_path_stem = rel_path.stem
-                hashed_id = hashlib.sha256(str(rel_path_stem).encode()).hexdigest()
-                classes = get_classes_in_img(full_split_dir, rel_path_stem)
+            # 1: check if a matching label exists, open said file, get classes from it
+            full_label_path, classes = get_classes_in_img(client, label_directory, rel_path_stem)
+            
+            catalogue_dict["id"].append(hashed_id)
+            catalogue_dict["s3_img_path"].append(full_img_path)
+            catalogue_dict["s3_label_path"].append(full_label_path)
+            catalogue_dict["class_ids"].append(classes)
+            catalogue_dict["split"].append(split)
                 
-                catalogue_dict["id"].append(hashed_id)
-                catalogue_dict["s3_img_path"].append(f"{CONFIG.image_dump_path}/{rel_path}")
-                catalogue_dict["s3_label_path"].append(f"{CONFIG.label_dump_path}/{rel_path}")
-                catalogue_dict["class_ids"].append(classes)
-                catalogue_dict["split"].append(split)
-                
+    image_catalogue = pd.DataFrame(catalogue_dict)
+    return image_catalogue
 
-    pd.DataFrame(catalogue_dict).to_csv(f"{temp_dir}/image_catalogue.csv", index=False) ## TODO: save this to s3
+def get_and_format_split_directories(metadata, expected_splits):
+    # NOTE: this is a non-clean way to normalize the paths received in data.yaml. 
+    # The data.yaml we have has a relative path that goes up a directory to access the datasets, which we might want to change.  
+    strip_relative_pathing = lambda s: re.sub(r'/images$', "", re.sub(r'^(\.)*\/', "", s))
+    split_directories = {k:f"{strip_relative_pathing(metadata[k])}" 
+                         for k in expected_splits if k in metadata.keys()}
+    missing_splits = set(expected_splits) - metadata.keys()
+    if missing_splits: 
+        print(f"WARNING: the following data splits do not exist in metadata: \n{missing_splits}")
+        
+    return split_directories
+    
+def extract(client, expected_splits=["train", "val", "test"]): 
+    metadata_key = f"{CONFIG.raw_prefix}/data.yaml"
+    
+    metadata = client.get_object(metadata_key, "yaml")
+    # Process some of the metadata to extract all other files needed
+    split_dirs = get_and_format_split_directories(metadata, expected_splits)
+    
+    image_files = {k:client.batch_get_filenames(f"{CONFIG.raw_prefix}/{v}/images") for k, v in split_dirs.items()}
+    
+    return {
+        "metadata": metadata, 
+        "split_directory": split_dirs,
+        "image_files": {k:v for k,v in image_files.items() if len(v) > 0} 
+    }
 
+def transform(client, retrieved_data): 
+    expected_keys = {"metadata", "split_directory", "image_files"}
+    missing_keys = expected_keys - set(list(retrieved_data.keys()))
+    if missing_keys:
+        raise Exception(f"Missing keys from Extract step: {missing_keys}")
+        
+    brand_df = create_brand_catalogue(retrieved_data["metadata"])
+    print("Created brand catalogue")
+    
+    print("Creating image and label catalogue..")
+    image_df = create_image_catalogue(client, retrieved_data["split_directory"], retrieved_data["image_files"])
+    print("Created image catalogue")
+    
+    return {
+        "brand_catalogue": brand_df, 
+        "image_catalogue": image_df
+    }
+
+def load(result_data, s3_output_path_prefix): 
+    expected_keys = {"brand_catalogue", "image_catalogue"}
+    missing_keys = expected_keys - set(list(result_data.keys()))
+    if missing_keys:
+        raise Exception(f"Missing keys from Transform step: {missing_keys}")
+    
+    result_data["brand_catalogue"].to_csv(f"{s3_output_path_prefix}/brand_catalogue.csv", index=False)
+    result_data["image_catalogue"].to_csv(f"{s3_output_path_prefix}/image_catalogue.csv", index=False)
+
+    print(f"Successfully saved data to s3 directory {s3_output_path_prefix}!")
 
 if __name__ == "__main__": 
-    argparse.ArgumentParser()
-    parser = argparse.ArgumentParser(
-                    prog='reformat_raw',
-                    description='Take in raw dataset on local device, reformats and saves to s3')
-
-    parser.add_argument('-d', '--data_path')
-    args = parser.parse_args()
-
-    data_dir = args.data_path #"../F1 Logos.v8i.yolov11_sample"
-    data_yaml_path = f"{data_dir}/data.yaml"
-    with open(data_yaml_path) as stream:
-        try:
-            data_metadata = yaml.safe_load(stream)
-        except yaml.YAMLError as exc:
-            raise Exception(exc)
+    s3 = s3Client(bucket=CONFIG.s3_bucket)
     
-    print("Saving brand catalogue..")
-    save_brand_catalogue(data_metadata)
-    print("Saving image and label catalogue..")
-    save_image_and_label_catalogue(data_metadata, parent_dir=data_dir)
-    print("Migrating image and label raws to s3..") # TODO
-
+    # Extract step
+    retrieved_data = extract(s3)
+    
+    # Transform step
+    result_data = transform(s3, retrieved_data)
+    
+    # Load (aka save) step
+    load(result_data, CONFIG.catalogue_path)
