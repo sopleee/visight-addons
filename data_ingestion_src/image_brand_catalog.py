@@ -1,13 +1,24 @@
-import pandas as pd
+import pandas as pd          
 from config import Config
 from pathlib import Path
 import hashlib
 import re
+import argparse
 from s3_client import s3Client
 from tqdm import tqdm
-import s3fs
+    
 
 CONFIG = Config()
+ACTIVE_PREFIX = None
+ACTIVE_VERSION = None
+
+def get_prefix(version: str) -> str:
+    if version == "raw":
+        return Config.raw_prefix
+    elif version == "v1":
+        return Config.processed_prefix
+    else:
+        raise ValueError(f"Unknown version {version}")
 
 def create_brand_catalogue(metadata):
     '''
@@ -42,7 +53,7 @@ def get_classes_in_img(client, label_directory, image_stem):
     except Exception as e:
         raise Exception(f"Error reading file {label_key} retrieved from s3: {e}")
 
-def create_image_catalogue(client, split_directories, images_per_split):
+def create_image_catalogue(client, split_directories, images_per_split, base_prefix: str):
     '''
     Input: 
     - client (s3 client)
@@ -71,7 +82,7 @@ def create_image_catalogue(client, split_directories, images_per_split):
     - split (str): one of ["train", "val", "test"]
     '''
 
-    label_directories = {k:f"{CONFIG.raw_prefix}/{v}/labels" for k, v in split_directories.items()}
+    label_directories = {k: f"{base_prefix}/{v}/labels" for k, v in split_directories.items()}
     catalogue_dict = {
         "id": [], "s3_img_path":[], "s3_label_path":[], "class_ids":[], "split":[]
     }
@@ -108,14 +119,14 @@ def get_and_format_split_directories(metadata, expected_splits):
         
     return split_directories
     
-def extract(client, expected_splits=["train", "val", "test"]): 
-    metadata_key = f"{CONFIG.raw_prefix}/data.yaml"
+def extract(client, base_prefix: str, expected_splits=["train", "val", "test"]): 
+    metadata_key = f"{base_prefix}/data.yaml"
     
     metadata = client.get_object(metadata_key, "yaml")
     # Process some of the metadata to extract all other files needed
     split_dirs = get_and_format_split_directories(metadata, expected_splits)
     
-    image_files = {k:client.batch_get_filenames(f"{CONFIG.raw_prefix}/{v}/images") for k, v in split_dirs.items()}
+    image_files = {k:client.batch_get_filenames(f"{base_prefix}/{v}/images") for k, v in split_dirs.items()}
     
     return {
         "metadata": metadata, 
@@ -123,7 +134,7 @@ def extract(client, expected_splits=["train", "val", "test"]):
         "image_files": {k:v for k,v in image_files.items() if len(v) > 0} 
     }
 
-def transform(client, retrieved_data): 
+def transform(client, retrieved_data, base_prefix: str): 
     expected_keys = {"metadata", "split_directory", "image_files"}
     missing_keys = expected_keys - set(list(retrieved_data.keys()))
     if missing_keys:
@@ -133,7 +144,7 @@ def transform(client, retrieved_data):
     print("Created brand catalogue")
     
     print("Creating image and label catalogue..")
-    image_df = create_image_catalogue(client, retrieved_data["split_directory"], retrieved_data["image_files"])
+    image_df = create_image_catalogue(client, retrieved_data["split_directory"], retrieved_data["image_files"], base_prefix)
     print("Created image catalogue")
     
     return {
@@ -141,25 +152,35 @@ def transform(client, retrieved_data):
         "image_catalogue": image_df
     }
 
-def load(result_data, s3_output_path_prefix): 
+def load(result_data, version: str): 
     expected_keys = {"brand_catalogue", "image_catalogue"}
     missing_keys = expected_keys - set(list(result_data.keys()))
     if missing_keys:
         raise Exception(f"Missing keys from Transform step: {missing_keys}")
     
-    result_data["brand_catalogue"].to_csv(f"{s3_output_path_prefix}/brand_catalogue.csv", index=False)
-    result_data["image_catalogue"].to_csv(f"{s3_output_path_prefix}/image_catalogue.csv", index=False)
+    out_prefix = f"{CONFIG.catalogue_path}/{version}"
+    result_data["brand_catalogue"].to_csv(f"{out_prefix}/brand_catalogue.csv", index=False)
+    result_data["image_catalogue"].to_csv(f"{out_prefix}/image_catalogue.csv", index=False)
 
-    print(f"Successfully saved data to s3 directory {s3_output_path_prefix}!")
+    print(f"Successfully saved data to s3 directory {out_prefix}!")
 
 if __name__ == "__main__": 
+
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--version", choices=["raw", "v1"], required=True)
+    args = parser.parse_args()
+
+    ACTIVE_VERSION = args.version
+    ACTIVE_PREFIX = get_prefix(args.version)
+    print(f"Running ingestion for s3://{Config.s3_bucket}/{ACTIVE_PREFIX}")
+
     s3 = s3Client(bucket=CONFIG.s3_bucket)
     
     # Extract step
-    retrieved_data = extract(s3)
+    retrieved_data = extract(s3, ACTIVE_PREFIX)
     
     # Transform step
-    result_data = transform(s3, retrieved_data)
+    result_data = transform(s3, retrieved_data, ACTIVE_PREFIX)
     
     # Load (aka save) step
-    load(result_data, CONFIG.catalogue_path)
+    load(result_data, ACTIVE_VERSION)

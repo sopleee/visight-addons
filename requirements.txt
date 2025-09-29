@@ -1,1 +1,6 @@
 PyYAML
+boto3
+Pillow
+pandas
+tqdm
+s3fs
