@@ -4,3 +4,6 @@ Pillow
 pandas
 tqdm
 s3fs
+modal
+ultralytics
+future
