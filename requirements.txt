@@ -4,3 +4,5 @@ Pillow
 pandas
 tqdm
 s3fs
+albumentations 
+opencv-python 
