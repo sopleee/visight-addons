@@ -88,5 +88,43 @@ class s3Client(DataClient):
         elif not file_paths: 
             print(f"WARNING: no files exist in {self.bucket}/{prefix}")
         return file_paths
+
+    def put_object(self, key, data, content_type=None):
+        try:
+            extra_args = {}
+            if content_type:
+                extra_args['ContentType'] = content_type
+                
+            if isinstance(data, bytes):
+                self.client.put_object(
+                    Bucket=self.bucket,
+                    Key=key,
+                    Body=data,
+                    **extra_args
+                )
+            else:
+                self.client.upload_fileobj(data, self.bucket, key, ExtraArgs=extra_args)
+            
+            return f"s3://{self.bucket}/{key}"
+        except Exception as e:
+            raise Exception(f"Failed to upload to {self.bucket}/{key}: {e}")
+
+    def upload_file(self, local_path, key, content_type=None):
+        try:
+            extra_args = {}
+            if content_type:
+                extra_args['ContentType'] = content_type
+                
+            self.client.upload_file(str(local_path), self.bucket, key, ExtraArgs=extra_args)
+            return f"s3://{self.bucket}/{key}"
+        except Exception as e:
+            raise Exception(f"Failed to upload file {local_path} to {self.bucket}/{key}: {e}")
+
+    def download_file(self, key, local_path):
+        try:
+            self.client.download_file(self.bucket, key, str(local_path))
+            return local_path
+        except Exception as e:
+            raise Exception(f"Failed to download {self.bucket}/{key} to {local_path}: {e}")
         
         
