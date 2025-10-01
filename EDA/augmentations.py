@@ -12,16 +12,48 @@ import yaml
 
 def build_augment_pipeline():
     return A.Compose([
+        # ---- photometric ----
         A.RandomBrightnessContrast(brightness_limit=0.2, contrast_limit=0.2, p=0.7),
         A.HueSaturationValue(hue_shift_limit=5, sat_shift_limit=20, val_shift_limit=20, p=0.5),
-        A.MotionBlur(blur_limit=5, p=0.2),
-        A.GaussianBlur(blur_limit=(3,5), p=0.2),
-        A.ImageCompression(quality_range=(50, 90), p=0.5),
-        A.GaussNoise(var_limit=(10.0, 50.0), p=0.3),
+
+        # ---- blur family  ----
+        A.OneOf([
+            A.MotionBlur(blur_limit=5, p=1.0),
+            A.GaussianBlur(blur_limit=(3, 5), p=1.0),
+            A.MedianBlur(blur_limit=5, p=1.0),
+        ], p=0.35),
+
+        # ---- compression / low-res ----
+        A.OneOf([
+            A.ImageCompression(quality_range=(50, 90), p=1.0),
+            A.Downscale(scale=0.5, p=1.0),  # simulate broadcast/downsampled frames
+        ], p=0.5),
+
+        # ---- noise family  ----
+        A.OneOf([
+            A.GaussNoise(std_range=(0.1, 0.2), p=1.0),
+            A.ISONoise(color_shift=(0.01, 0.05), intensity=(0.1, 0.4), p=1.0),
+        ], p=0.3),
+
+        # ---- mild geometry ----
         A.Affine(scale=(0.9, 1.1), translate_percent=(0.0, 0.08),
                  rotate=(-5, 5), shear=(-3, 3), p=0.7),
-        A.Perspective(scale=(0.01, 0.03), p=0.15),
-    ], bbox_params=A.BboxParams(format='yolo', label_fields=['class_labels'], min_visibility=0.2))
+        A.Perspective(scale=(0.005, 0.02), p=0.15),
+
+        # ---- occasional bbox-safe crop to upsample small logos ----
+        A.RandomScale(scale_limit=0.15, p=0.25),  
+
+        # ---- light occlusion (rare) ----
+        A.CoarseDropout(num_holes_range=(1, 1),
+                       hole_height_range=(0.06, 0.12),
+                       hole_width_range=(0.06, 0.12),
+                       fill=0,
+                       p=0.15),
+    ],
+    bbox_params=A.BboxParams(format='yolo',
+                             label_fields=['class_labels'],
+                             min_visibility=0.2))
+
 
 def read_yolo_labels(label_path: Path):
     boxes = []
@@ -75,8 +107,8 @@ def resolve_path(base_dir: Path, p: str) -> Path:
 def main():
     parser = argparse.ArgumentParser(description="Offline long-tail augmentation for YOLO datasets (Ultralytics layout)")
     parser.add_argument("--data_yaml", type=str, required=True, help="Path to data.yaml (Ultralytics style)")
-    parser.add_argument("--floor", type=int, default=100, help="Minimum train instances per class after augmentation")
-    parser.add_argument("--max_per_image", type=int, default=2, help="Max augmented copies per source image per pass")
+    parser.add_argument("--floor", type=int, default=150, help="Minimum train instances per class after augmentation")
+    parser.add_argument("--max_per_image", type=int, default=3, help="Max augmented copies per source image per pass")
     parser.add_argument("--suffix", type=str, default="_aug", help="Suffix for augmented files")
     parser.add_argument("--limit", type=int, default=0, help="Optional cap on total augmented samples to generate (0=unlimited)")
     parser.add_argument("--seed", type=int, default=42, help="Random seed")
