@@ -1,10 +1,10 @@
 import pandas as pd          
-from config import Config
+from pipelines.config import Config
 from pathlib import Path
 import hashlib
 import re
 import argparse
-from s3_client import s3Client
+from pipelines.s3_client import s3Client
 from tqdm import tqdm
     
 
@@ -37,7 +37,6 @@ def create_brand_catalogue(metadata):
     brand_names = metadata["names"]
     brand_df = pd.DataFrame({"id": [i for i in range(metadata["nc"])], "name": brand_names})
     return brand_df
-    # brand_df.to_csv(f"{temp_dir}/brand_catalogue.csv", index=False) ## TODO write to s3 directly instead
 
 def get_classes_in_img(client, label_directory, image_stem):
     '''

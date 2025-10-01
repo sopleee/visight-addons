@@ -4,8 +4,8 @@ import json
 import tempfile
 import cv2
 import numpy as np
-from video_processor import VideoProcessor
-from s3_client import s3Client
+from pipelines.inference.video_processor import VideoProcessor
+from pipelines.s3_client import s3Client
 from tqdm import tqdm
 
 
