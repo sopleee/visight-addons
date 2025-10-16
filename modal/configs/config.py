@@ -4,4 +4,3 @@ class Config:
     processed_prefix = "processed/roboflow/v1"
     bucket_name = "visight-data-yusufmoola"
     ultralytics_version = "ultralytics>=8.3.0"
-    

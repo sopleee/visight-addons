@@ -6,33 +6,19 @@ import shutil
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path, PosixPath
-from typing import Optional, Tuple
-
+from typing import Optional, Tuple, Union
+import yaml
 import modal
 from ultralytics import YOLO
-
-# ----------------------------
-# CONFIG
-# ----------------------------
-from config import Config  
-
-BUCKET_NAME = Config.bucket_name
-ULTRALYTICS_VERSION = Config.ultralytics_version
-
-# S3 bucket is mounted inside the container at /bucket (CloudBucketMount)
-MOUNT_PATH = PosixPath("/bucket")
-
-VOLUME_PATH = Path("/root/data")
-DATA_WORKDIR = VOLUME_PATH / "work"            # where we stage datasets locally
-RUNS_DIR = VOLUME_PATH / "runs"                # where Ultralytics writes runs
+from configs.config import Config
 
 # ----------------------------
 # Modal app & image
 # ----------------------------
-image = (
-    modal.Image.debian_slim(python_version="3.10")
-    .apt_install(["libgl1-mesa-glx", "libglib2.0-0"])
-    .pip_install([ULTRALYTICS_VERSION, "opencv-python~=4.10.0"])
+image = (modal.Image.from_dockerfile("Dockerfile")
+    .apt_install(["libgl1", "libglib2.0-0"])
+    .add_local_file("./configs/config.py", remote_path="/config.py")
+    .add_local_file("./configs/model_config.yaml", remote_path="/model_config.yaml")
 )
 
 app = modal.App("visight-yolo-finetune", image=image)
@@ -42,8 +28,23 @@ s3_secret = modal.Secret.from_name(
     "s3-bucket-secret",
     required_keys=["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"],
 )
+# wandb_secret = modal.Secret.from_name("wandb-secret", required_keys=["WANDB_API_KEY"])
 vol = modal.Volume.from_name("visight-yolo-runs", create_if_missing=True)
 
+# ----------------------------
+# CONFIG
+# ----------------------------
+CONFIG = Config()
+
+BUCKET_NAME = CONFIG.bucket_name
+ULTRALYTICS_VERSION = CONFIG.ultralytics_version
+OPTIONAL_TRAIN_SPEC_FIELDS = ["warmup_epochs", "dropout", "freeze"]
+# S3 bucket is mounted inside the container at /bucket (CloudBucketMount)
+MOUNT_PATH = Path("/bucket") #PosixPath("/bucket")
+
+VOLUME_PATH = Path("/root/data")
+DATA_WORKDIR = VOLUME_PATH / "work"            # where we stage datasets locally
+RUNS_DIR = VOLUME_PATH / "runs"                # where Ultralytics writes runs
 
 # ----------------------------
 # Data model
@@ -54,11 +55,15 @@ class TrainSpec:
     model_size: str = "yolov8s.pt"       # base checkpoint
     epochs: int = 20
     img_size: int = 1280
-    batch: float | int = 0.95            # auto-batch target (float) or fixed int
+    batch: float = 0.95 #Union[float, int] = 0.95            # auto-batch target (float) or fixed int
     workers: int = 4
     seed: int = 117
     use_wandb: bool = False
     notes: str = ""
+    freeze: int = 1
+    warmup_epochs: Optional[int] = None
+    dropout: Optional[float] = None
+    
 
     def s3_prefix(self) -> str:
         # Allow friendly shorthands
@@ -153,6 +158,9 @@ def write_model_card(
         "notes": spec.notes,
         "artifacts": artifacts,
     }
+    for c in OPTIONAL_TRAIN_SPEC_FIELDS:
+        if getattr(spec, c) is not None: card[c] = getattr(spec, c)
+    
     out = dst_dir / "model_card.json"
     out.write_text(json.dumps(card, indent=2), encoding="utf-8")
 
@@ -212,7 +220,7 @@ def copy_training_artifacts_to_s3(
 # Training function
 # ----------------------------
 @app.function(
-    secrets=[s3_secret],
+    secrets=[s3_secret],# wandb_secret],
     volumes={MOUNT_PATH: modal.CloudBucketMount(BUCKET_NAME, secret=s3_secret), VOLUME_PATH: vol},
     timeout=60 * 60 * 4,   # up to 4h
     cpu=4,
@@ -223,10 +231,14 @@ def train_yolo(
     model_size: str = "yolov8s.pt",
     epochs: int = 20,
     img_size: int = 640,
-    batch: float | int = 0.95,
+    batch: float = 0.95, #Union[float, int] = 0.95,
     use_wandb: bool = False,
     notes: str = "",
     export_to_onnx: bool = True,
+    n_layers_freeze: float = 1,
+    warmup_epochs: Optional[int] = None,
+    dropout: Optional[float] = None,
+    plots: bool = True,
 ):
     """
     Fine-tune YOLO on a dataset stored in S3 (mounted), staging the data locally to avoid
@@ -242,10 +254,15 @@ def train_yolo(
         batch=batch,
         use_wandb=use_wandb,
         notes=notes,
+        freeze=n_layers_freeze,
+        warmup_epochs=warmup_epochs,
+        dropout=dropout,
     )
 
     if spec.use_wandb:
         os.environ.setdefault("WANDB_START_METHOD", "thread")
+        # import wandb
+        # wandb.init(project="visight")
     else:
         os.environ["WANDB_MODE"] = "disabled"
 
@@ -276,6 +293,8 @@ def train_yolo(
         exist_ok=True,
         seed=spec.seed,
         verbose=True,
+        plots=plots,
+        **{k: getattr(spec, k) for k in OPTIONAL_TRAIN_SPEC_FIELDS if getattr(spec, k) is not None}
     )
 
     # Optional: export ONNX
@@ -288,7 +307,7 @@ def train_yolo(
         run_dir=run_dir,
         model_id=model_id,
         save_results_csv=True,
-        save_plots=False,
+        save_plots=plots,
     )
 
     # Model card
@@ -325,30 +344,46 @@ def train_yolo(
 # ----------------------------
 @app.local_entrypoint()
 def main(
+    params: Optional[str] = None,  # Can pass in a config (ex: ./configs/model_config.yaml). This overrides all other args of this function
     dataset_version: str = "raw",   # "raw", "v1", or explicit s3 prefix (e.g., "tmp/smoke_v1")
     model_size: str = "yolov8s.pt",
     epochs: int = 10,
     img_size: int = 640,
-    batch: float | int = 0.95,
+    batch: float = 0.95, #Union[float, int] = 0.95,
     use_wandb: bool = False,
     notes: str = "",
     quick_check: bool = False,
     export_to_onnx: bool = True,
+    warmup_epochs: int = 0, 
+    dropout:float=0.3,
+    plots:bool=True,
+    freeze:float=1,
 ):
+        
+    param_dict = {
+        "dataset_version":dataset_version,
+        "model_size":model_size,
+        "epochs":epochs,
+        "img_size":img_size,
+        "batch":batch,
+        "use_wandb":use_wandb,
+        "notes":notes,
+        "export_to_onnx":export_to_onnx,
+        "warmup_epochs":warmup_epochs, 
+        "dropout":dropout,
+        "plots":plots, 
+        "n_layers_freeze":freeze
+    }
+    
+    if params: 
+        with open(params, "r") as param_file: 
+            param_override = yaml.safe_load(param_file)
+        param_dict = {k:v if param_override.get(k, None) is None else param_override[k] for k,v in param_dict.items()}
     """
     Kick off a training job on Modal.
     Use quick_check=True for a fast dry run (epochs forced to 1).
     """
     if quick_check:
-        epochs = 1
-
-    train_yolo.remote(
-        dataset_version=dataset_version,
-        model_size=model_size,
-        epochs=epochs,
-        img_size=img_size,
-        batch=batch,
-        use_wandb=use_wandb,
-        notes=notes,
-        export_to_onnx=export_to_onnx,
-    )
+        param_dict["epochs"] = 1
+    
+    train_yolo.remote(**param_dict)
