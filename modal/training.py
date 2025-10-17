@@ -28,6 +28,11 @@ s3_secret = modal.Secret.from_name(
     "s3-bucket-secret",
     required_keys=["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"],
 )
+s3_secret_backup = modal.Secret.from_name(
+    "s3-bucket-secret",
+    required_keys=["AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"],
+)
+
 # wandb_secret = modal.Secret.from_name("wandb-secret", required_keys=["WANDB_API_KEY"])
 vol = modal.Volume.from_name("visight-yolo-runs", create_if_missing=True)
 
@@ -339,6 +344,126 @@ def train_yolo(
     print("  ", f"s3://{BUCKET_NAME}/models/{model_id}/model_card.json")
 
 
+
+@app.function(
+    secrets=[s3_secret],# wandb_secret],
+    volumes={MOUNT_PATH: modal.CloudBucketMount(BUCKET_NAME, secret=s3_secret_backup), VOLUME_PATH: vol},
+    timeout=60 * 60 * 4,   # up to 4h
+    cpu=4,
+    gpu="A10G:1",
+)
+def train_yolo_backup(
+    dataset_version: str = "raw",        # "raw", "v1", or explicit s3 prefix
+    model_size: str = "yolov8s.pt",
+    epochs: int = 20,
+    img_size: int = 640,
+    batch: float = 0.95, #Union[float, int] = 0.95,
+    use_wandb: bool = False,
+    notes: str = "",
+    export_to_onnx: bool = True,
+    n_layers_freeze: float = 1,
+    warmup_epochs: Optional[int] = None,
+    dropout: Optional[float] = None,
+    plots: bool = True,
+):
+    """
+    Fine-tune YOLO on a dataset stored in S3 (mounted), staging the data locally to avoid
+    cache/rename issues. Saves best.pt (+ optional best.onnx) to s3://{bucket}/models/{model_id}/
+    and results.csv to s3://{bucket}/stats/training/{model_id}/.
+    """
+    # Set up spec and environment
+    spec = TrainSpec(
+        dataset_version=dataset_version,
+        model_size=model_size,
+        epochs=epochs,
+        img_size=img_size,
+        batch=batch,
+        use_wandb=use_wandb,
+        notes=notes,
+        freeze=n_layers_freeze,
+        warmup_epochs=warmup_epochs,
+        dropout=dropout,
+    )
+
+    if spec.use_wandb:
+        os.environ.setdefault("WANDB_START_METHOD", "thread")
+        # import wandb
+        # wandb.init(project="visight")
+    else:
+        os.environ["WANDB_MODE"] = "disabled"
+
+    # Stage dataset locally (avoid CloudBucketMount rename limitations)
+    prefix = spec.s3_prefix()
+    local_data_root = stage_dataset_from_s3(prefix)
+    data_yaml_path = local_data_root / "data.yaml"
+
+    # Unique run descriptors
+    run_id = _now_utc_stamp()
+    base_name = Path(spec.model_size).stem
+    model_id = f"{spec.dataset_version}-{base_name}-{run_id}"
+    run_dir = RUNS_DIR / model_id
+    run_dir.mkdir(parents=True, exist_ok=True)
+
+    # Train
+    model = YOLO(spec.model_size)
+    model.train(
+        data=str(data_yaml_path),
+        imgsz=spec.img_size,
+        epochs=spec.epochs,
+        device=0,                # single GPU
+        batch=spec.batch,
+        workers=spec.workers,
+        cache=False,             # keep False; we staged locally anyway
+        project=str(RUNS_DIR),
+        name=model_id,
+        exist_ok=True,
+        seed=spec.seed,
+        verbose=True,
+        plots=plots,
+        **{k: getattr(spec, k) for k in OPTIONAL_TRAIN_SPEC_FIELDS if getattr(spec, k) is not None}
+    )
+
+    # Optional: export ONNX
+    onnx_path: Optional[Path] = None
+    if export_to_onnx:
+        onnx_path = export_onnx(run_dir / "weights" / "best.pt", run_dir, spec.img_size)
+
+    # Persist artifacts to S3
+    best_pt_s3, onnx_s3, results_csv_s3 = copy_training_artifacts_to_s3(
+        run_dir=run_dir,
+        model_id=model_id,
+        save_results_csv=True,
+        save_plots=plots,
+    )
+
+    # Model card
+    artifacts = {
+        "best_pt": f"s3://{BUCKET_NAME}/models/{model_id}/best.pt",
+        "best_onnx": f"s3://{BUCKET_NAME}/models/{model_id}/best.onnx" if onnx_s3 else None,
+        "results_csv": f"s3://{BUCKET_NAME}/stats/training/{model_id}/results.csv" if results_csv_s3 else None,
+    }
+    write_model_card(
+        dst_dir=run_dir,
+        model_id=model_id,
+        spec=spec,
+        artifacts=artifacts,
+        data_yaml_local=data_yaml_path,
+    )
+    _safe_copy_file(run_dir / "model_card.json", MOUNT_PATH / "models" / model_id / "model_card.json")
+
+    # Persist volume state
+    vol.commit()
+
+    print("Training complete.")
+    print("Saved artifacts:")
+    print("  ", artifacts["best_pt"])
+    if artifacts["best_onnx"]:
+        print("  ", artifacts["best_onnx"])
+    if artifacts["results_csv"]:
+        print("  ", artifacts["results_csv"])
+    print("Model card:")
+    print("  ", f"s3://{BUCKET_NAME}/models/{model_id}/model_card.json")
+
 # ----------------------------
 # Local entrypoint
 # ----------------------------
@@ -385,5 +510,7 @@ def main(
     """
     if quick_check:
         param_dict["epochs"] = 1
-    
-    train_yolo.remote(**param_dict)
+    try: 
+        train_yolo.remote(**param_dict)
+    except: 
+        train_yolo_backup.remote(**param_dict)
