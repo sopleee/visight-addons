@@ -3,6 +3,8 @@ import yaml
 from pathlib import Path
 import re
 from typing import Optional
+from botocore.exceptions import ClientError
+
 
 class DataClient: 
     
@@ -40,22 +42,52 @@ class DataClient:
 
 class s3Client(DataClient):
     
-    def __init__(self, bucket): 
+    def __init__(self, buckets): 
         self.client = boto3.client('s3')
-        self.bucket = bucket
-    
+        exceptions={}
+        valid_found = False
+        for bucket in buckets: 
+            try: 
+                self.bucket = bucket
+                self.client.head_bucket(Bucket=bucket)
+                valid_found = True
+                break
+            except Exception as e: exceptions[bucket] = e
+            
+        if not valid_found: raise Exception("All bucket options failed! Error messages: ", exceptions)
+        
+        try: 
+            response = self.client.get_bucket_versioning(
+                Bucket=self.bucket,
+            )
+            self.versioning_enabled = response.get("Status")
+        except: self.versioning_enabled = "Unknown"            
+            
+    def _check_and_fix_key(self, key, max_version_lookback=10): 
+        try: 
+            res = self.client.list_object_versions(Bucket=self.bucket, Prefix=key, MaxKeys=max_version_lookback)
+            for v in res.get("Versions"): 
+                response = self.client.get_object(Bucket=self.bucket, Key=key, VersionId=v.get("VersionId"))["Body"]
+                stream = response.read()
+                return stream
+        except Exception as e: 
+            raise Exception(f"Failed to fetch {self.bucket}/{key} from s3: {e}")
+        
     def _add_bucket_prefix(self, filepath):
         return f"{self.bucket}/{filepath}"
         
     def _remove_bucket_prefix(self, full_filepath): 
         return re.sub(fr"^{self.bucket}/", "", full_filepath)
     
-    def get_object(self, key, parse_format:Optional[str]):
+    def get_object(self, key, parse_format:Optional[str]=None, auto_check_prev_versions:bool=False):        
         try:
             response = self.client.get_object(Bucket=self.bucket, Key=key)["Body"]
             stream = response.read()
-        except Exception as e: 
-            raise Exception(f"Failed to fetch {self.bucket}/{key} from s3: {e}")
+        except ClientError as e:
+            if e.response['Error']['Code'] == 'NoSuchKey' and auto_check_prev_versions:
+                stream = self._check_and_fix_key(key)
+                # TODO: add log indicating that previous version was used
+            else: raise Exception(f"Failed to fetch {self.bucket}/{key} from s3: {e}")
 
         parse_fxn = self.supported_formats().get(parse_format) if parse_format else None
         if parse_fxn: 

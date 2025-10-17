@@ -191,7 +191,7 @@ if __name__ == "__main__":
     ACTIVE_PREFIX = get_prefix(args.version)
     print(f"Running ingestion for s3://{Config.s3_bucket}/{ACTIVE_PREFIX}")
 
-    s3 = s3Client(bucket=CONFIG.s3_bucket)
+    s3 = s3Client(buckets=[CONFIG.s3_bucket])
     
     # Extract step
     retrieved_data = extract(s3, ACTIVE_PREFIX)
