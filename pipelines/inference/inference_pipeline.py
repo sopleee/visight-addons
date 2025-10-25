@@ -4,9 +4,18 @@ import json
 import tempfile
 import cv2
 import numpy as np
-from pipelines.inference.video_processor import VideoProcessor
-from pipelines.s3_client import s3Client
+from video_processor import VideoProcessor
+# from s3_client import s3Client
 from tqdm import tqdm
+from ultralytics import YOLO
+import sys
+from pathlib import Path
+
+# Add parent directory to Python path
+sys.path.append(str(Path(__file__).parent.parent))
+
+# Now use absolute import
+from s3_client import s3Client
 
 
 class InferencePipeline:
@@ -14,14 +23,18 @@ class InferencePipeline:
     Main inference pipeline for video logo detection
     """
     
-    def __init__(self, s3_bucket: str, fps: int = None, confidence_threshold: float = 0.5):
-        self.s3_client = s3Client(bucket=s3_bucket)
+    def __init__(self, s3_bucket: str, model_key, fps: int = None, confidence_threshold: float = 0.5):
+        self.s3_client = s3Client(buckets=[s3_bucket])
         self.video_processor = VideoProcessor(fps=fps)
         self.bucket = s3_bucket
         self.confidence_threshold = confidence_threshold
-        self.model = None  # Placeholder for model
-    
-        # self.model = load_model() once available
+        
+        pt_weights = self.s3_client.get_object(model_key)
+        with tempfile.NamedTemporaryFile(delete=False, suffix='.pt') as tmp_file:
+            tmp_file.write(pt_weights)
+            tmp_path = tmp_file.name
+
+        self.model = YOLO(tmp_path)    
     
     def run_inference_on_video(self, video_path: str, video_id: str, 
                                upload_to_s3: bool = True, 
@@ -150,7 +163,7 @@ class InferencePipeline:
         print(f"\n{'='*60}")
         print(f"Pipeline complete for video: {video_id}")
         print(f"Total detections: {summary_stats['total_detections']}")
-        print(f"Frames with detections: {summary_stats['frames_with_detections']}")
+        print(f"Frames with detections: {summary_stats['frames_with_detections']}, out of {summary_stats['total_frames']} frames")
         print(f"{'='*60}\n")
         
         return pipeline_results
@@ -184,32 +197,32 @@ class InferencePipeline:
             }
         """
         print("Running model inference...")
-        
+        # detections = self.model.predict([f["file_path"] for f in frames_metadata], verbose=False, stream=True)
         results = []
         for frame_meta in tqdm(frames_metadata, desc="Inference"):
+            # frame_meta = frames_metadata[i]
             frame_path = Path(frame_meta["file_path"])
-            
-            detections = [] # TODO: Replace with actual model inference
+            frame_detections = next(self.model.predict([frame_meta["file_path"]], 
+                                                       conf=self.confidence_threshold, verbose=False, stream=True))
+            name_map = frame_detections.names
             
             # Filter by confidence threshold
-            filtered_detections = [
-                d for d in detections 
-                if d["confidence"] >= self.confidence_threshold
-            ]
+            detection_data = frame_detections.boxes.data.tolist()
+            detection_info = [{"bbox": d[:4], "confidence":d[4], "class_name":name_map[d[5]]} for d in detection_data]
             
             result = {
                 "frame_id": frame_meta["frame_id"],
                 "frame_number": frame_meta["frame_number"],
                 "timestamp": frame_meta["timestamp"],
-                "detections": filtered_detections,
-                "detection_count": len(filtered_detections)
+                "detections": detection_info,
+                "detection_count": len(detection_info)
             }
             
             # Draw bounding boxes on frame if requested
-            if annotated_dir and filtered_detections:
+            if annotated_dir and len(detection_info) > 0:
                 annotated_path = self._draw_bounding_boxes(
                     frame_path, 
-                    filtered_detections, 
+                    detection_info, 
                     annotated_dir
                 )
                 result["annotated_frame_path"] = str(annotated_path)
@@ -320,13 +333,14 @@ def main():
     parser = argparse.ArgumentParser(description="Run inference pipeline on video")
     parser.add_argument("--video", required=True, help="Path to video file")
     parser.add_argument("--video_id", help="Video ID (defaults to filename)")
+    parser.add_argument("--model_key", type=str, default="models/raw-yolov8s-20251009-171047/best.pt", help="S3 key to model.pt")
     parser.add_argument("--bucket", default="visight-data-yusufmoola", help="S3 bucket name")
     parser.add_argument("--fps", type=int, help="Target FPS for frame extraction (default: all frames)")
     parser.add_argument("--confidence", type=float, default=0.5, help="Confidence threshold for detections")
     parser.add_argument("--no_upload", action="store_true", help="Skip uploading to S3")
     parser.add_argument("--no_annotate", action="store_true", help="Skip saving annotated frames")
     
-    args = parser.parse_args()
+    args = parser.parse_args()    
     
     # Use filename as video_id if not provided
     if not args.video_id:
@@ -334,6 +348,7 @@ def main():
     
     pipeline = InferencePipeline(
         s3_bucket=args.bucket, 
+        model_key=args.model_key,
         fps=args.fps,
         confidence_threshold=args.confidence
     )
