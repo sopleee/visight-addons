@@ -42,5 +42,5 @@ jobs:
       - name: Deploy to dev
         if: github.ref == 'refs/heads/dev'
         run: |
-          MODAL_ENV="prod"
+          MODAL_ENV="dev"
           modal deploy -m pipelines.inference.model_server
