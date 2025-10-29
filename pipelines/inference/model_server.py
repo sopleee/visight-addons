@@ -5,9 +5,28 @@ import zipfile
 import requests
 import re
 from typing import Optional
+import os
+
+ENV = os.getenv("MODAL_ENV", "dev")
 
 # ====== CONFIG ======
-APP_NAME = "visight-yolo-prod"
+INFRASTRUCTURE_CONFIG = {
+    "dev": {
+        "gpu": "T4",
+        "keep_warm": 0,
+        "concurrency_limit": 1,
+        "max_containers": 2,
+    },
+    "prod": {
+        "gpu": "T4",
+        "keep_warm": 1,
+        "concurrency_limit": 10,
+        "max_containers": 20,
+    }
+}
+
+
+APP_NAME = "visight-yolo"
 BUCKET_NAME = "visight-data-yusufmoola"
 MOUNT_PATH = Path("/bucket")                 
 SMOKE_DATA_YAML = MOUNT_PATH / "tmp/smoke_v1" / "data.yaml"
@@ -38,8 +57,7 @@ image = (
         "fastapi", "boto3"
     ])
 )
-
-app = modal.App(APP_NAME, image=image)
+app = modal.App(f"{APP_NAME}-{ENV}", image=image)
 
 def zip_directory(directory_paths, other_paths, zip_path):
     with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
@@ -123,7 +141,8 @@ class InferenceRequest(BaseModel):
     confidence_threshold: Optional[float] = 0.5
 
 @app.function(
-    gpu="t4",
+    **INFRASTRUCTURE_CONFIG[ENV],
+    # gpu="t4",
     cpu=2,
     timeout=60 * 10,
     volumes={MOUNT_PATH: modal.CloudBucketMount(BUCKET_NAME, secret=S3_SECRET)},
@@ -143,8 +162,9 @@ def inference(request: InferenceRequest, save_to_s3: bool = False):
     # vid_url = "https://drive.google.com/file/d/1ya6iuzDMhqCSZG8uRpLsvrNeNA77d8Ew/view?usp=sharing"
     download_from_google_drive(request.video_url, local_vid_path)
     logger.info("Finished downloading video")
+    cur_config = Config(env=ENV)
     
-    model_path = MOUNT_PATH / Path(Config.prod_model_key)
+    model_path = MOUNT_PATH / Path(cur_config.model_key)
         
     pipeline = InferencePipeline(
         model_path=model_path / "best.pt",
@@ -155,12 +175,12 @@ def inference(request: InferenceRequest, save_to_s3: bool = False):
     
     timestamp = datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
     
-    video_id = f"{str(Path(Config.prod_model_key).stem)}_{timestamp}"
+    video_id = f"{str(Path(cur_config.model_key).stem)}_{timestamp}"
     
     annotated_frame_dir, res_json_path = pipeline.run_inference_on_video(
         video_path=local_vid_path, 
         video_id=video_id, 
-        s3_bucket=Config.s3_bucket if save_to_s3 else save_to_s3,
+        s3_bucket=cur_config.s3_bucket if save_to_s3 else save_to_s3,
         save_annotated_frames=True
     )
     
