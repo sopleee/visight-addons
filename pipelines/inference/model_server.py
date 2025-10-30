@@ -142,11 +142,10 @@ class InferenceRequest(BaseModel):
 
 @app.function(
     **INFRASTRUCTURE_CONFIG[ENV],
-    # gpu="t4",
     cpu=2,
     timeout=60 * 10,
     volumes={MOUNT_PATH: modal.CloudBucketMount(BUCKET_NAME, secret=S3_SECRET)},
-    secrets=[S3_SECRET]
+    secrets=[S3_SECRET], 
 )
 @modal.fastapi_endpoint(method="POST")
 def inference(request: InferenceRequest, save_to_s3: bool = False): 
