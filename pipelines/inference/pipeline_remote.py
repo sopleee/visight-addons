@@ -237,7 +237,6 @@ class InferencePipeline:
                 result["annotated_frame_path"] = str(annotated_path)
                 
             results.append(result)
-            break
         
         return results
     
