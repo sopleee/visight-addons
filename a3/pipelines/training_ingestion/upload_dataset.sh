@@ -1,7 +1,6 @@
 # NOTE: NEED TO HAVE YOUR AWS CLI SET UP AND CONFIGURED TO RUN THIS SCRIPT
 # CD INTO YOUR DATA SET DIRECTORY FIRST AND THEN RUN THIS SCRIPT
 #!/usr/bin/env bash
-set -euo pipefail
 
 # ==== CONFIG ====
 # REQUIRED: set your bucket name once (or pass BUCKET=... on the command line)

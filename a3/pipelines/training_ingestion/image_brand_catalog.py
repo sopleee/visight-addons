@@ -1,10 +1,10 @@
 import pandas as pd          
-from config import Config
+from pipelines.configs.config import Config
 from pathlib import Path
 import hashlib
 import re
 import argparse
-from s3_client import s3Client
+from pipelines.clients.s3_client import s3Client
 from tqdm import tqdm
     
 
@@ -17,6 +17,8 @@ def get_prefix(version: str) -> str:
         return Config.raw_prefix
     elif version == "v1":
         return Config.processed_prefix
+    elif version == "aug":
+        return Config.aug_prefix
     else:
         raise ValueError(f"Unknown version {version}")
 
@@ -35,7 +37,6 @@ def create_brand_catalogue(metadata):
     brand_names = metadata["names"]
     brand_df = pd.DataFrame({"id": [i for i in range(metadata["nc"])], "name": brand_names})
     return brand_df
-    # brand_df.to_csv(f"{temp_dir}/brand_catalogue.csv", index=False) ## TODO write to s3 directly instead
 
 def get_classes_in_img(client, label_directory, image_stem):
     '''
@@ -45,13 +46,29 @@ def get_classes_in_img(client, label_directory, image_stem):
     label_key = f"{label_directory}/{str(image_stem)}.txt"
     try:
         label_file = client.get_object(label_key, "txt")
-        if len(label_file.replace(" ", "")) == 0:
-            return label_key, []
-        classes = list(set(int(line.strip().split(" ")[0]) for line in label_file.split("\n")))
-        classes.sort()
-        return label_key, classes
     except Exception as e:
-        raise Exception(f"Error reading file {label_key} retrieved from s3: {e}")
+        raise Exception(f"Error fetching file {label_key} from s3: {e}")
+
+    if not label_file or len(label_file.strip()) == 0:
+        return label_key, []
+
+    class_ids = set()
+    for raw_line in label_file.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        parts = line.split()
+        if len(parts) != 5:
+            continue
+        cls_token = parts[0]
+        try:
+            cls_id = int(float(cls_token))
+        except (ValueError, TypeError):
+            continue
+        class_ids.add(cls_id)
+
+    classes = sorted(class_ids)
+    return label_key, classes
 
 def create_image_catalogue(client, split_directories, images_per_split, base_prefix: str):
     '''
@@ -167,14 +184,14 @@ def load(result_data, version: str):
 if __name__ == "__main__": 
 
     parser = argparse.ArgumentParser()
-    parser.add_argument("--version", choices=["raw", "v1"], required=True)
+    parser.add_argument("--version", choices=["raw", "v1", "aug"], required=True)
     args = parser.parse_args()
 
     ACTIVE_VERSION = args.version
     ACTIVE_PREFIX = get_prefix(args.version)
     print(f"Running ingestion for s3://{Config.s3_bucket}/{ACTIVE_PREFIX}")
 
-    s3 = s3Client(bucket=CONFIG.s3_bucket)
+    s3 = s3Client(buckets=[CONFIG.s3_bucket])
     
     # Extract step
     retrieved_data = extract(s3, ACTIVE_PREFIX)
