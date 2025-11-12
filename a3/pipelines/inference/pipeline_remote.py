@@ -10,17 +10,20 @@ from pathlib import Path
 from pipelines.clients.s3_client import s3Client
 from typing import Optional
 import logging
+import math
 
 class InferencePipeline:
     """
     Main inference pipeline for video logo detection
     """
     
-    def __init__(self, model_path: str, fps: int = None, confidence_threshold: float = 0.5, logger:Optional[logging.Logger] = None):
+    def __init__(self, model_path: str, fps: int = None, 
+                 confidence_threshold: float = 0.5, logger:Optional[logging.Logger] = None, batch_size: int = 80):
         self.video_processor = VideoProcessor(fps=fps)
         self.confidence_threshold = confidence_threshold        
         self.model = YOLO(model_path)
         self.logger = logger
+        self.batch_size = batch_size
     
     def run_inference_on_video(self, video_path: str, video_id: str, 
                                s3_bucket: Optional[str] = None, 
@@ -107,6 +110,7 @@ class InferencePipeline:
             frames_dir, 
             annotated_dir
         )
+        print("INFERENCE RESULTS:", len(inference_results))
         
         # Step 6: Upload annotated frames to S3
         if s3_client and save_annotated_frames and annotated_dir:
@@ -206,38 +210,52 @@ class InferencePipeline:
                 "annotated_frame_path": str (if annotated_dir provided)
             }
         """
-        # detections = self.model.predict([f["file_path"] for f in frames_metadata], verbose=False, stream=True)
+        batches = self._split_into_batches(frames_metadata)
         results = []
-        for frame_meta in tqdm(frames_metadata, desc="Inference"):
-            # frame_meta = frames_metadata[i]
-            frame_path = Path(frame_meta["file_path"])
-            frame_detections = next(self.model.predict([frame_meta["file_path"]], 
-                                                       conf=self.confidence_threshold, verbose=False, stream=True))
-            name_map = frame_detections.names
-            
-            # Filter by confidence threshold
-            detection_data = frame_detections.boxes.data.tolist()
+        for i in range(len(batches)): 
+            results.extend(self._minibatch_inference(i, batches[i]["paths"], batches[i]["frame_meta"], annotated_dir))
+        
+        return results
+    
+    def _split_into_batches(self, frames_metadata: list): 
+        batches = []
+        num_batches = math.ceil(len(frames_metadata)/self.batch_size)
+        for i in range(num_batches): 
+            start_i = i*self.batch_size
+            end_i = min((i + 1) * self.batch_size, len(frames_metadata))
+            metadata_slice = frames_metadata[start_i:end_i]
+            batches.append({"paths":[f["file_path"] for f in metadata_slice],
+                            "frame_meta": metadata_slice})
+        
+        return batches
+    
+    def _minibatch_inference(self, batch_index: int, frame_paths: list[str], file_meta: list[dict], annotated_dir: Path = None):
+        results = []
+        i = 0
+        all_dets = self.model.predict(frame_paths, conf=self.confidence_threshold, verbose=False, stream=True)
+        
+        for det in tqdm(all_dets, total=len(file_meta), desc=f"Batch {batch_index} Processing"): 
+            name_map = det.names
+            detection_data = det.boxes.data.tolist()
             detection_info = [{"bbox": d[:4], "confidence":d[4], "class_name":name_map[d[5]]} for d in detection_data]
-            
             result = {
-                "frame_id": frame_meta["frame_id"],
-                "frame_number": frame_meta["frame_number"],
-                "timestamp": frame_meta["timestamp"],
+                "frame_id": file_meta[i]["frame_id"],
+                "frame_number": file_meta[i]["frame_number"],
+                "timestamp": file_meta[i]["timestamp"],
                 "detections": detection_info,
                 "detection_count": len(detection_info)
             }
-            
-            # Draw bounding boxes on frame if requested
             if annotated_dir and len(detection_info) > 0:
                 annotated_path = self._draw_bounding_boxes(
-                    frame_path, 
+                    Path(file_meta[i]["file_path"]), 
                     detection_info, 
                     annotated_dir
                 )
                 result["annotated_frame_path"] = str(annotated_path)
                 
             results.append(result)
-        
+            i += 1
+                    
         return results
     
     def _draw_bounding_boxes(self, frame_path: Path, detections: list, 
