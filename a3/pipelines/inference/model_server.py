@@ -13,14 +13,12 @@ ENV = os.getenv("MODAL_ENV", "dev")
 INFRASTRUCTURE_CONFIG = {
     "dev": {
         "gpu": "T4",
-        "keep_warm": 0,
-        "concurrency_limit": 1,
+        "min_containers": 0,
         "max_containers": 2,
     },
     "prod": {
         "gpu": "T4",
-        "keep_warm": 1,
-        "concurrency_limit": 10,
+        "min_containers": 1,
         "max_containers": 20,
     }
 }
@@ -178,7 +176,7 @@ def inference(request: InferenceRequest, save_to_s3: bool = False):
     
     video_id = f"{str(Path(cur_config.model_key).stem)}_{timestamp}"
     
-    annotated_frame_dir, res_json_path = pipeline.run_inference_on_video(
+    res_dirs, res_json_path = pipeline.run_inference_on_video(
         video_path=local_vid_path, 
         video_id=video_id, 
         s3_bucket=cur_config.s3_bucket if save_to_s3 else save_to_s3,
@@ -188,7 +186,7 @@ def inference(request: InferenceRequest, save_to_s3: bool = False):
     temp_zip = tempfile.NamedTemporaryFile(delete=False, suffix='.zip')
     logger.info("Started zipping results")  
     try: 
-        zip_directory([annotated_frame_dir], [res_json_path], temp_zip.name)
+        zip_directory(res_dirs, [res_json_path], temp_zip.name)
     except Exception as e: 
         raise Exception(f"Error during zip: {e}")
     logger.info("Finished zipping")   
