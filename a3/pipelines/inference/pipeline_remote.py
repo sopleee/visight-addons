@@ -215,7 +215,7 @@ class InferencePipeline:
         else: print(msg)
         
         res_dirs = ([annotated_dir] if annotated_dir else []) + [frames_dir.parent / "profiling"] # [Path("/data/profiling")]
-        
+
         return res_dirs, res_summary_path
     
     def _run_model_inference(self, frames_metadata: list, frames_dir: Path, 
@@ -246,12 +246,32 @@ class InferencePipeline:
                 "annotated_frame_path": str (if annotated_dir provided)
             }
         """
-        batches = self._split_into_batches(frames_metadata)
-        results = []
-        for i in range(len(batches)): 
-            results.extend(self._minibatch_inference(i, batches[i]["paths"], batches[i]["frame_meta"], annotated_dir))
-        
-        return results
+        profiler = cProfile.Profile()
+        profiler.enable()
+        try:
+            batches = self._split_into_batches(frames_metadata)
+            results = []
+            for i in range(len(batches)): 
+                results.extend(self._minibatch_inference(i, batches[i]["paths"], batches[i]["frame_meta"], annotated_dir))
+            
+            return results
+        finally:
+            profiler.disable()
+            
+            # Save profiling stats
+            s = StringIO()
+            ps = pstats.Stats(profiler, stream=s).sort_stats('cumulative')
+            ps.print_stats(50)  # Top 50 functions
+            
+            # Save profile to frames directory parent
+            timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+            profile_output_dir = frames_dir.parent / "profiling"
+            profile_output_dir.mkdir(parents=True, exist_ok=True)
+            profile_file = profile_output_dir / f"run_model_inference_{timestamp}.txt"
+            # with open(profile_file, 'w') as f:
+            #     f.write(s.getvalue())
+            profile_file.write_text(s.getvalue())
+            print(f"\n[PROFILING] _run_model_inference profile saved to: {profile_file}")
     
     def _split_into_batches(self, frames_metadata: list): 
         batches = []
@@ -267,10 +287,33 @@ class InferencePipeline:
     
     @profiled(name="generate_summary_stats", stats_limit=50)
     def _minibatch_inference(self, batch_index: int, frame_paths: list[str], file_meta: list[dict], annotated_dir: Path = None):
+        # profiler = cProfile.Profile()
+        # profiler.enable()
+        # try:
+        all_dets = self.model.predict(frame_paths, conf=self.confidence_threshold, verbose=False, stream=True)
+        # finally:
+        #     profiler.disable()
+            
+        #     # Save profiling stats
+        #     s = StringIO()
+        #     ps = pstats.Stats(profiler, stream=s).sort_stats('cumulative')
+        #     ps.print_stats(50)  # Top 50 functions
+            
+        #     # Save profile to frames directory parent
+        #     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+        #     profile_output_dir = Path("/data/profiling")
+        #     profile_output_dir.mkdir(parents=True, exist_ok=True)
+        #     profile_file = profile_output_dir / f"minibatch_inference_{timestamp}.txt"
+        #     profile_file.write_text(s.getvalue())
+        #     print(f"\n[PROFILING] minibatch_inference profile saved to: {profile_file}")
+        return self._process_inference_res(batch_index, all_dets, file_meta, annotated_dir)
+    
+    def _process_inference_res(self, batch_index: int, all_dets, file_meta: list[dict], annotated_dir: Path = None): 
+        # profiler = cProfile.Profile()
+        # profiler.enable()
+        # try:
         results = []
         i = 0
-        all_dets = self.model.predict(frame_paths, conf=self.confidence_threshold, verbose=False, stream=True)
-        
         for det in tqdm(all_dets, total=len(file_meta), desc=f"Batch {batch_index} Processing"): 
             name_map = det.names
             detection_data = det.boxes.data.tolist()
@@ -292,8 +335,23 @@ class InferencePipeline:
                 
             results.append(result)
             i += 1
-                    
+            
         return results
+        # finally:
+        #     profiler.disable()
+            
+        #     # Save profiling stats
+        #     s = StringIO()
+        #     ps = pstats.Stats(profiler, stream=s).sort_stats('cumulative')
+        #     ps.print_stats(50)  # Top 50 functions
+            
+        #     # Save profile to frames directory parent
+        #     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+        #     profile_output_dir = Path("/data/profiling")
+        #     profile_output_dir.mkdir(parents=True, exist_ok=True)
+        #     profile_file = profile_output_dir / f"inference_res_processing_{timestamp}.txt"
+        #     profile_file.write_text(s.getvalue())
+        #     print(f"\n[PROFILING] _run_model_inference profile saved to: {profile_file}")
     
     @profiled(name="draw_bounding_boxes", stats_limit=50)
     def _draw_bounding_boxes(self, frame_path: Path, detections: list, 

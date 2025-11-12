@@ -13,14 +13,12 @@ ENV = os.getenv("MODAL_ENV", "dev")
 INFRASTRUCTURE_CONFIG = {
     "dev": {
         "gpu": "T4",
-        "keep_warm": 0,
-        "concurrency_limit": 1,
+        "min_containers": 0,
         "max_containers": 2,
     },
     "prod": {
         "gpu": "T4",
-        "keep_warm": 1,
-        "concurrency_limit": 10,
+        "min_containers": 1,
         "max_containers": 20,
     }
 }
