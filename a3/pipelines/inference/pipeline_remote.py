@@ -15,6 +15,36 @@ import pstats
 from io import StringIO
 from datetime import datetime, timezone
 
+"""
+Profiling utilities (stdlib cProfile)
+"""
+def profiled(name: Optional[str] = None, stats_limit: int = 50, outdir: Optional[Path] = None):
+    """Decorator that profiles a function with cProfile and writes stats.
+
+    - Sorts by cumulative time as per docs.
+    - Writes to /data/profiling by default (Modal container path).
+    - Filenames include function name and UTC timestamp.
+    """
+    def decorator(func):
+        def wrapper(*args, **kwargs):
+            profiler = cProfile.Profile()
+            profiler.enable()
+            try:
+                return func(*args, **kwargs)
+            finally:
+                profiler.disable()
+                s = StringIO()
+                pstats.Stats(profiler, stream=s).sort_stats('cumulative').print_stats(stats_limit)
+                ts = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+                output_dir = outdir or Path("/data/profiling")
+                output_dir.mkdir(parents=True, exist_ok=True)
+                fname = f"{(name or func.__name__)}_{ts}.txt"
+                profile_file = output_dir / fname
+                profile_file.write_text(s.getvalue())
+                print(f"\n[PROFILING] {func.__name__} profile saved to: {profile_file}")
+        return wrapper
+    return decorator
+
 class InferencePipeline:
     """
     Main inference pipeline for video logo detection
@@ -264,6 +294,7 @@ class InferencePipeline:
             profile_file.write_text(s.getvalue())
             print(f"\n[PROFILING] _run_model_inference profile saved to: {profile_file}")
     
+    @profiled(name="draw_bounding_boxes", stats_limit=50)
     def _draw_bounding_boxes(self, frame_path: Path, detections: list, 
                             output_dir: Path) -> Path:
         """
@@ -315,6 +346,7 @@ class InferencePipeline:
         
         return output_path
     
+    @profiled(name="generate_summary_stats", stats_limit=50)
     def _generate_summary_stats(self, inference_results: list) -> dict:
         """
         Generate summary statistics from inference results

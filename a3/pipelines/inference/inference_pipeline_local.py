@@ -8,6 +8,10 @@ from tqdm import tqdm
 from ultralytics import YOLO
 from pathlib import Path
 from pipelines.clients.s3_client import s3Client
+import cProfile
+import pstats
+from io import StringIO
+from datetime import datetime, timezone
 
 
 class InferencePipeline:
@@ -188,40 +192,51 @@ class InferencePipeline:
                 "annotated_frame_path": str (if annotated_dir provided)
             }
         """
-        print("Running model inference...")
-        # detections = self.model.predict([f["file_path"] for f in frames_metadata], verbose=False, stream=True)
-        results = []
-        for frame_meta in tqdm(frames_metadata, desc="Inference"):
-            # frame_meta = frames_metadata[i]
-            frame_path = Path(frame_meta["file_path"])
-            frame_detections = next(self.model.predict([frame_meta["file_path"]], 
-                                                       conf=self.confidence_threshold, verbose=False, stream=True))
-            name_map = frame_detections.names
-            
-            # Filter by confidence threshold
-            detection_data = frame_detections.boxes.data.tolist()
-            detection_info = [{"bbox": d[:4], "confidence":d[4], "class_name":name_map[d[5]]} for d in detection_data]
-            
-            result = {
-                "frame_id": frame_meta["frame_id"],
-                "frame_number": frame_meta["frame_number"],
-                "timestamp": frame_meta["timestamp"],
-                "detections": detection_info,
-                "detection_count": len(detection_info)
-            }
-            
-            # Draw bounding boxes on frame if requested
-            if annotated_dir and len(detection_info) > 0:
-                annotated_path = self._draw_bounding_boxes(
-                    frame_path, 
-                    detection_info, 
-                    annotated_dir
-                )
-                result["annotated_frame_path"] = str(annotated_path)
-            
-            results.append(result)
-        
-        return results
+        profiler = cProfile.Profile()
+        profiler.enable()
+        try:
+            print("Running model inference...")
+            # detections = self.model.predict([f["file_path"] for f in frames_metadata], verbose=False, stream=True)
+            results = []
+            for frame_meta in tqdm(frames_metadata, desc="Inference"):
+                frame_path = Path(frame_meta["file_path"])
+                frame_detections = next(self.model.predict([frame_meta["file_path"]], 
+                                                           conf=self.confidence_threshold, verbose=False, stream=True))
+                name_map = frame_detections.names
+                
+                # Filter by confidence threshold
+                detection_data = frame_detections.boxes.data.tolist()
+                detection_info = [{"bbox": d[:4], "confidence":d[4], "class_name":name_map[d[5]]} for d in detection_data]
+                
+                result = {
+                    "frame_id": frame_meta["frame_id"],
+                    "frame_number": frame_meta["frame_number"],
+                    "timestamp": frame_meta["timestamp"],
+                    "detections": detection_info,
+                    "detection_count": len(detection_info)
+                }
+                
+                # Draw bounding boxes on frame if requested
+                if annotated_dir and len(detection_info) > 0:
+                    annotated_path = self._draw_bounding_boxes(
+                        frame_path, 
+                        detection_info, 
+                        annotated_dir
+                    )
+                    result["annotated_frame_path"] = str(annotated_path)
+                
+                results.append(result)
+            return results
+        finally:
+            profiler.disable()
+            s = StringIO()
+            pstats.Stats(profiler, stream=s).sort_stats('cumulative').print_stats(50)
+            timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+            profile_output_dir = frames_dir.parent / "profiling"
+            profile_output_dir.mkdir(parents=True, exist_ok=True)
+            profile_file = profile_output_dir / f"run_model_inference_{timestamp}.txt"
+            profile_file.write_text(s.getvalue())
+            print(f"\n[PROFILING] _run_model_inference profile saved to: {profile_file}")
     
     def _draw_bounding_boxes(self, frame_path: Path, detections: list, 
                             output_dir: Path) -> Path:

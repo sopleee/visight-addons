@@ -3,6 +3,10 @@ from pathlib import Path
 import hashlib
 from typing import Optional, List
 import json
+import cProfile
+import pstats
+from io import StringIO
+from datetime import datetime, timezone
 
 
 class VideoProcessor:
@@ -20,70 +24,83 @@ class VideoProcessor:
         - timestamp: timestamp in video (seconds)
         - file_path: path to saved frame image
         """
-        output_path = Path(output_dir)
-        output_path.mkdir(parents=True, exist_ok=True)
-        
-        cap = cv2.VideoCapture(str(video_path))
-        if not cap.isOpened():
-            raise Exception(f"Failed to open video: {video_path}")
-        
-        video_fps = cap.get(cv2.CAP_PROP_FPS)
-        total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-        
-        if self.target_fps and self.target_fps < video_fps:
-            frame_interval = int(video_fps / self.target_fps)
-        else:
-            frame_interval = 1
-        
-        print(f"Video FPS: {video_fps}, Total frames: {total_frames}")
-        print(f"Extracting every {frame_interval} frame(s)")
-        
-        frames_metadata = []
-        frame_count = 0
-        extracted_count = 0
-        
-        while True:
-            ret, frame = cap.read()
-            if not ret:
-                break
+        profiler = cProfile.Profile()
+        profiler.enable()
+        try:
+            output_path = Path(output_dir)
+            output_path.mkdir(parents=True, exist_ok=True)
             
-            if frame_count % frame_interval == 0:
-                timestamp = frame_count / video_fps
-                frame_filename = f"frame_{frame_count:06d}.jpg"
-                frame_path = output_path / frame_filename
-                
-                cv2.imwrite(str(frame_path), frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
-                
-                frame_id = hashlib.sha256(f"{video_path}_{frame_count}".encode()).hexdigest()
-                
-                frames_metadata.append({
-                    "frame_id": frame_id,
-                    "frame_number": frame_count,
-                    "timestamp": round(timestamp, 3),
-                    "file_path": str(frame_path)
-                })
-                
-                extracted_count += 1
+            cap = cv2.VideoCapture(str(video_path))
+            if not cap.isOpened():
+                raise Exception(f"Failed to open video: {video_path}")
             
-            frame_count += 1
-        
-        cap.release()
-        
-        print(f"Extracted {extracted_count} frames from {total_frames} total frames")
-        
-        # Save metadata
-        metadata_path = output_path / "frames_metadata.json"
-        with open(metadata_path, 'w') as f:
-            json.dump({
-                "video_path": str(video_path),
-                "video_fps": video_fps,
-                "total_frames": total_frames,
-                "extracted_frames": extracted_count,
-                "frame_interval": frame_interval,
-                "frames": frames_metadata
-            }, f, indent=2)
-        
-        return frames_metadata
+            video_fps = cap.get(cv2.CAP_PROP_FPS)
+            total_frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+            
+            if self.target_fps and self.target_fps < video_fps:
+                frame_interval = int(video_fps / self.target_fps)
+            else:
+                frame_interval = 1
+            
+            print(f"Video FPS: {video_fps}, Total frames: {total_frames}")
+            print(f"Extracting every {frame_interval} frame(s)")
+            
+            frames_metadata = []
+            frame_count = 0
+            extracted_count = 0
+            
+            while True:
+                ret, frame = cap.read()
+                if not ret:
+                    break
+                
+                if frame_count % frame_interval == 0:
+                    timestamp = frame_count / video_fps
+                    frame_filename = f"frame_{frame_count:06d}.jpg"
+                    frame_path = output_path / frame_filename
+                    
+                    cv2.imwrite(str(frame_path), frame, [cv2.IMWRITE_JPEG_QUALITY, 95])
+                    
+                    frame_id = hashlib.sha256(f"{video_path}_{frame_count}".encode()).hexdigest()
+                    
+                    frames_metadata.append({
+                        "frame_id": frame_id,
+                        "frame_number": frame_count,
+                        "timestamp": round(timestamp, 3),
+                        "file_path": str(frame_path)
+                    })
+                    
+                    extracted_count += 1
+                
+                frame_count += 1
+            
+            cap.release()
+            
+            print(f"Extracted {extracted_count} frames from {total_frames} total frames")
+            
+            # Save metadata
+            metadata_path = output_path / "frames_metadata.json"
+            with open(metadata_path, 'w') as f:
+                json.dump({
+                    "video_path": str(video_path),
+                    "video_fps": video_fps,
+                    "total_frames": total_frames,
+                    "extracted_frames": extracted_count,
+                    "frame_interval": frame_interval,
+                    "frames": frames_metadata
+                }, f, indent=2)
+            
+            return frames_metadata
+        finally:
+            profiler.disable()
+            s = StringIO()
+            pstats.Stats(profiler, stream=s).sort_stats('cumulative').print_stats(30)
+            timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+            profile_output_dir = Path(output_dir).parent / "profiling"
+            profile_output_dir.mkdir(parents=True, exist_ok=True)
+            profile_file = profile_output_dir / f"extract_frames_{timestamp}.txt"
+            profile_file.write_text(s.getvalue())
+            print(f"\n[PROFILING] extract_frames profile saved to: {profile_file}")
     
     def get_video_info(self, video_path: str) -> dict:
         """
