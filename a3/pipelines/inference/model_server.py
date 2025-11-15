@@ -162,12 +162,6 @@ class InferenceRequest(BaseModel):
     confidence_threshold: Optional[float] = 0.5
     batch_size: Optional[int] = 200
 
-# mem_request = 1024
-# mem_limit = 2048
-# @app.function(
-#     memory=(mem_request, mem_limit),
-# )
-
 @app.function()
 @modal.fastapi_endpoint(method="POST")
 @modal.concurrent(max_inputs=100)
@@ -260,7 +254,6 @@ def download_result(job_id: str):
     volumes={MOUNT_PATH: modal.CloudBucketMount(BUCKET_NAME, secret=S3_SECRET), 
              "/results": results_volume},
     secrets=[S3_SECRET], 
-    # memory=(1024, 4*1024)  # currently maximize at 4GB?
 )
 def inference(job_id: str, request: InferenceRequest, save_to_s3: bool = False): 
     from pipelines.inference.pipeline_remote import InferencePipeline
@@ -284,7 +277,7 @@ def inference(job_id: str, request: InferenceRequest, save_to_s3: bool = False):
         fps=request.fps,
         confidence_threshold=request.confidence_threshold, 
         logger=logger, 
-        batch_size=request.batch_size
+        batch_size=min(100, request.batch_size)
     )
         
     video_id = f"{str(Path(cur_config.model_key).stem)}_{datetime.now().strftime('%Y_%m_%d_%H_%M_%S')}"
