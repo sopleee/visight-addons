@@ -24,7 +24,7 @@ INFRASTRUCTURE_CONFIG = {
 }
 
 
-APP_NAME = "visight-yolo"
+APP_NAME = "visight-yolo-test"
 BUCKET_NAME = "visight-data-yusufmoola"
 MOUNT_PATH = Path("/bucket")                 
 SMOKE_DATA_YAML = MOUNT_PATH / "tmp/smoke_v1" / "data.yaml"
@@ -162,8 +162,15 @@ class InferenceRequest(BaseModel):
     confidence_threshold: Optional[float] = 0.5
     batch_size: Optional[int] = 200
 
+# mem_request = 1024
+# mem_limit = 2048
+# @app.function(
+#     memory=(mem_request, mem_limit),
+# )
+
 @app.function()
 @modal.fastapi_endpoint(method="POST")
+@modal.concurrent(max_inputs=100)
 def submit_job(request: InferenceRequest, save_to_s3: bool = False):
     import uuid
     import json
@@ -179,6 +186,7 @@ def submit_job(request: InferenceRequest, save_to_s3: bool = False):
 
 @app.function()
 @modal.fastapi_endpoint(method="GET")
+@modal.concurrent(max_inputs=100)
 def check_status(job_id: str):
     """Check job status and progress"""
     import json
@@ -192,6 +200,7 @@ def check_status(job_id: str):
     return status_json
 
 @app.function(volumes={"/results": results_volume})
+@modal.concurrent(max_inputs=100)
 @modal.fastapi_endpoint(method="GET")
 def download_result(job_id: str):
     """Download completed result"""
@@ -250,12 +259,14 @@ def download_result(job_id: str):
     timeout=3000,
     volumes={MOUNT_PATH: modal.CloudBucketMount(BUCKET_NAME, secret=S3_SECRET), 
              "/results": results_volume},
-    secrets=[S3_SECRET],
+    secrets=[S3_SECRET], 
+    # memory=(1024, 4*1024)  # currently maximize at 4GB?
 )
 def inference(job_id: str, request: InferenceRequest, save_to_s3: bool = False): 
     from pipelines.inference.pipeline_remote import InferencePipeline
     from pipelines.configs.config import Config
     from datetime import datetime
+    from fastapi import HTTPException
     import json
     
     local_vid_path = "sample_vid.mp4"
@@ -278,13 +289,17 @@ def inference(job_id: str, request: InferenceRequest, save_to_s3: bool = False):
         
     video_id = f"{str(Path(cur_config.model_key).stem)}_{datetime.now().strftime('%Y_%m_%d_%H_%M_%S')}"
     
-    res_dirs, res_json_path = pipeline.run_inference_on_video(
-        video_path=local_vid_path, 
-        video_id=video_id, 
-        s3_bucket=cur_config.s3_bucket if save_to_s3 else save_to_s3,
-        save_annotated_frames=True
-    )
-    
+    try: 
+        res_dirs, res_json_path = pipeline.run_inference_on_video(
+            video_path=local_vid_path, 
+            video_id=video_id, 
+            s3_bucket=cur_config.s3_bucket if save_to_s3 else save_to_s3,
+            save_annotated_frames=True
+        )
+    except Exception as e: 
+        print("error!", e)
+        raise HTTPException(status_code=500)
+
     zip_path = Path(f"/results/{job_id}.zip")
     logger.info("Started zipping results")  
     try: zip_directory(res_dirs, [res_json_path], zip_path)
