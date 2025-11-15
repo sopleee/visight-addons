@@ -36,6 +36,8 @@ import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
+job_status_dict = modal.Dict.from_name("job-status", create_if_missing=True)
+results_volume = modal.Volume.from_name("results-volume", create_if_missing=True)
 
 S3_SECRET = modal.Secret.from_name( 
     "s3-bucket-secret",
@@ -58,13 +60,34 @@ image = (
 app = modal.App(f"{APP_NAME}-{ENV}", image=image)
 
 def zip_directory(directory_paths, other_paths, zip_path):
+    i = 0
     with zipfile.ZipFile(zip_path, 'w', zipfile.ZIP_DEFLATED) as zf:
         for directory_path in directory_paths:
             for file_path in Path(directory_path).rglob('*'):  # rglob for recursive
                 if file_path.is_file():
                     arcname = file_path.relative_to(directory_path)
                     zf.write(file_path, arcname=f"{str(directory_path.stem)}/{arcname}")
-        for path in other_paths: zf.write(path)
+                    i += 1
+        for path in other_paths: 
+            zf.write(path)
+            i+=1
+    print(f"NUM FILES ZIPPED:", i)
+    
+    import os
+    file_size = os.path.getsize(zip_path)
+    print(f"Zip file size: {file_size:,} bytes")
+    
+    if file_size == 0:
+        raise ValueError("Zip file is empty after creation!")
+    
+    # Verify it's a valid zip
+    with zipfile.ZipFile(zip_path, 'r') as verify_zf:
+        file_list = verify_zf.namelist()
+        print(f"Verified {len(file_list)} files in zip")
+        if len(file_list) == 0:
+            raise ValueError("Zip file has no contents!")
+    import os
+    os.sync()
 
 def download_from_google_drive(share_link, output_path):
     """
@@ -139,20 +162,101 @@ class InferenceRequest(BaseModel):
     confidence_threshold: Optional[float] = 0.5
     batch_size: Optional[int] = 200
 
+@app.function()
+@modal.fastapi_endpoint(method="POST")
+def submit_job(request: InferenceRequest, save_to_s3: bool = False):
+    import uuid
+    import json
+    from datetime import datetime
+    job_id = str(uuid.uuid4())
+    inference.spawn(job_id, request, save_to_s3)
+    job_status_dict[job_id] = json.dumps({
+        "cur_status": "submitted",
+        "cur_status_progress": 100, 
+        "updated_at": datetime.now().isoformat()
+    }) # json.dumps
+    return {"job_id": job_id}
+
+@app.function()
+@modal.fastapi_endpoint(method="GET")
+def check_status(job_id: str):
+    """Check job status and progress"""
+    import json
+    print(f"check_status - job_id: '{job_id}' (len={len(job_id)})")
+    print(f"check_status - job_id type: {type(job_id)}")
+    print(f"check_status - job_id repr: {repr(job_id)}")
+
+    status_json = job_status_dict.get(job_id)
+    
+    if status_json is None: return {"error": "Job not found"}, 404
+    return status_json
+
+@app.function(volumes={"/results": results_volume})
+@modal.fastapi_endpoint(method="GET")
+def download_result(job_id: str):
+    """Download completed result"""
+    import os
+    import json
+    from fastapi.responses import FileResponse
+    import tempfile
+    import shutil
+    import zipfile
+    status = job_status_dict.get(job_id)
+    if status is None: 
+        print(f"Job not found: {job_id}")
+        return {"error": "Job not found"}, 404
+    status = json.loads(status)
+    if status["cur_status"] != "completed":
+        return {
+            "error": "Job not completed",
+            "status": status["cur_status"],
+            "progress": status["cur_status_progress"]
+        }, 400
+    
+    # Return zip file
+    zip_path = f"/results/{job_id}.zip"
+    if not os.path.exists(zip_path): 
+        print(f"File DNE: {zip_path}")
+        return {"error": "Result file not found"}, 404
+    
+    try:
+        with zipfile.ZipFile(zip_path, 'r') as zf:
+            num_files = len(zf.namelist())
+            print(f"Zip contains {num_files} files")
+            
+            if num_files == 0: return {"error": "Zip file has no contents"}, 500
+    except zipfile.BadZipFile as e: return {"error": f"Invalid zip file: {e}"}, 500
+
+    # Copy the zip into temp
+    temp_zip = tempfile.NamedTemporaryFile(delete=False, suffix='.zip')
+    shutil.copy(zip_path, temp_zip.name)
+    
+    os.remove(zip_path)
+    results_volume.commit()
+    
+    
+    # Remove status
+    if job_id in job_status_dict: del job_status_dict[job_id]
+    
+    return FileResponse(
+        temp_zip.name,
+        media_type="application/zip",
+        filename=f"results_{job_id}.zip"
+    )
+
 @app.function(
     **INFRASTRUCTURE_CONFIG[ENV],
     cpu=2,
     timeout=3000,
-    volumes={MOUNT_PATH: modal.CloudBucketMount(BUCKET_NAME, secret=S3_SECRET)},
+    volumes={MOUNT_PATH: modal.CloudBucketMount(BUCKET_NAME, secret=S3_SECRET), 
+             "/results": results_volume},
     secrets=[S3_SECRET],
 )
-@modal.fastapi_endpoint(method="POST")
-def inference(request: InferenceRequest, save_to_s3: bool = False): 
-    import tempfile
-    from fastapi.responses import FileResponse
+def inference(job_id: str, request: InferenceRequest, save_to_s3: bool = False): 
     from pipelines.inference.pipeline_remote import InferencePipeline
     from pipelines.configs.config import Config
     from datetime import datetime
+    import json
     
     local_vid_path = "sample_vid.mp4"
     
@@ -171,10 +275,8 @@ def inference(request: InferenceRequest, save_to_s3: bool = False):
         logger=logger, 
         batch_size=request.batch_size
     )
-    
-    timestamp = datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
-    
-    video_id = f"{str(Path(cur_config.model_key).stem)}_{timestamp}"
+        
+    video_id = f"{str(Path(cur_config.model_key).stem)}_{datetime.now().strftime('%Y_%m_%d_%H_%M_%S')}"
     
     res_dirs, res_json_path = pipeline.run_inference_on_video(
         video_path=local_vid_path, 
@@ -183,16 +285,47 @@ def inference(request: InferenceRequest, save_to_s3: bool = False):
         save_annotated_frames=True
     )
     
-    temp_zip = tempfile.NamedTemporaryFile(delete=False, suffix='.zip')
+    zip_path = Path(f"/results/{job_id}.zip")
     logger.info("Started zipping results")  
-    try: 
-        zip_directory(res_dirs, [res_json_path], temp_zip.name)
-    except Exception as e: 
-        raise Exception(f"Error during zip: {e}")
-    logger.info("Finished zipping")   
-         
-    return FileResponse(
-        temp_zip.name,
-        media_type='application/zip',
-        filename='results.zip'
-    )
+    try: zip_directory(res_dirs, [res_json_path], zip_path)
+    except Exception as e: raise Exception(f"Error during zip: {e}")
+    logger.info("Finished zipping") 
+    import os
+    file_size = os.path.getsize(zip_path)
+    print(f"Zip file size: {file_size:,} bytes")
+    if file_size == 0: raise ValueError("Zip file is empty after creation!")  
+    
+    results_volume.commit()
+             
+    job_status_dict[job_id] = json.dumps({
+        "cur_status": "completed",
+        "cur_status_progress": 100, 
+        "updated_at": datetime.now().isoformat()
+    })
+
+@app.function(volumes={"/results": results_volume})
+@modal.fastapi_endpoint(method="GET")
+def debug_list_volume_contents():
+    """Debug: List everything in the volume"""
+    import os
+    
+    if not os.path.exists("/results"):
+        return {"error": "/results doesn't exist", "exists": False}
+    
+    files = []
+    for filename in os.listdir("/results"):
+        filepath = os.path.join("/results", filename)
+        size = os.path.getsize(filepath) if os.path.isfile(filepath) else 0
+        files.append({
+            "name": filename,
+            "size": size,
+            "is_file": os.path.isfile(filepath)
+        })
+    
+    return {
+        "directory": "/results",
+        "exists": True,
+        "total_files": len(files),
+        "files": files
+    }
+
