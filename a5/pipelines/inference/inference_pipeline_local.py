@@ -1,8 +1,12 @@
 import argparse
+import cProfile
+import pstats
+from io import StringIO
 from pathlib import Path
 import json
 import tempfile
 import cv2
+from datetime import datetime, timezone
 from pipelines.inference.video_processor import VideoProcessor
 from tqdm import tqdm
 from ultralytics import YOLO
@@ -191,14 +195,17 @@ class InferencePipeline:
                 "detection_count": int,
                 "annotated_frame_path": str (if annotated_dir provided)
             }
+        PROFILED FUNCTION
         """
         profiler = cProfile.Profile()
         profiler.enable()
+        
         try:
             print("Running model inference...")
             # detections = self.model.predict([f["file_path"] for f in frames_metadata], verbose=False, stream=True)
             results = []
             for frame_meta in tqdm(frames_metadata, desc="Inference"):
+                # frame_meta = frames_metadata[i]
                 frame_path = Path(frame_meta["file_path"])
                 frame_detections = next(self.model.predict([frame_meta["file_path"]], 
                                                            conf=self.confidence_threshold, verbose=False, stream=True))
@@ -226,11 +233,17 @@ class InferencePipeline:
                     result["annotated_frame_path"] = str(annotated_path)
                 
                 results.append(result)
+            
             return results
         finally:
             profiler.disable()
+            
+            # Save profiling stats
             s = StringIO()
-            pstats.Stats(profiler, stream=s).sort_stats('cumulative').print_stats(50)
+            ps = pstats.Stats(profiler, stream=s).sort_stats('cumulative')
+            ps.print_stats(50)  # Top 50 functions
+            
+            # Save profile to frames directory parent
             timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
             profile_output_dir = frames_dir.parent / "profiling"
             profile_output_dir.mkdir(parents=True, exist_ok=True)

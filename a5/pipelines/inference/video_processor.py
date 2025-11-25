@@ -1,7 +1,11 @@
 import cv2
+import cProfile
+import pstats
+from io import StringIO
 from pathlib import Path
 import hashlib
 from typing import Optional, List
+from datetime import datetime, timezone
 import json
 import cProfile
 import pstats
@@ -23,9 +27,12 @@ class VideoProcessor:
         - frame_number: sequential frame number
         - timestamp: timestamp in video (seconds)
         - file_path: path to saved frame image
+        
+        PROFILED FUNCTION
         """
         profiler = cProfile.Profile()
         profiler.enable()
+        
         try:
             output_path = Path(output_dir)
             output_path.mkdir(parents=True, exist_ok=True)
@@ -93,8 +100,13 @@ class VideoProcessor:
             return frames_metadata
         finally:
             profiler.disable()
+            
+            # Save profiling stats
             s = StringIO()
-            pstats.Stats(profiler, stream=s).sort_stats('cumulative').print_stats(30)
+            ps = pstats.Stats(profiler, stream=s).sort_stats('cumulative')
+            ps.print_stats(30)  # Top 30 functions
+            
+            # Save profile to output directory
             timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
             profile_output_dir = Path(output_dir).parent / "profiling"
             profile_output_dir.mkdir(parents=True, exist_ok=True)
