@@ -205,6 +205,7 @@ class InferencePipeline:
             # detections = self.model.predict([f["file_path"] for f in frames_metadata], verbose=False, stream=True)
             results = []
             for frame_meta in tqdm(frames_metadata, desc="Inference"):
+                # frame_meta = frames_metadata[i]
                 frame_path = Path(frame_meta["file_path"])
                 frame_detections = next(self.model.predict([frame_meta["file_path"]], 
                                                            conf=self.confidence_threshold, verbose=False, stream=True))

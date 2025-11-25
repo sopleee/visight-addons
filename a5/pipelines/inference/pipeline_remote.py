@@ -16,6 +16,7 @@ import pstats
 from io import StringIO
 from datetime import datetime, timezone
 
+
 """
 Profiling utilities (stdlib cProfile)
 """
@@ -285,7 +286,7 @@ class InferencePipeline:
         
         return batches
     
-    @profiled(name="generate_summary_stats", stats_limit=50)
+    @profiled(name="_minibatch_inference", stats_limit=50)
     def _minibatch_inference(self, batch_index: int, frame_paths: list[str], file_meta: list[dict], annotated_dir: Path = None):
         profiler = cProfile.Profile()
         profiler.enable()
