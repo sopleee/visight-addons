@@ -1,5 +1,4 @@
 import argparse
-from pathlib import Path
 import json
 import tempfile
 import cv2
@@ -246,33 +245,11 @@ class InferencePipeline:
                 "annotated_frame_path": str (if annotated_dir provided)
             }
         """
-        # profiler = cProfile.Profile()
-        # profiler.enable()
-        # try:
         batches = self._split_into_batches(frames_metadata)
         results = []
         for i in range(len(batches)): 
             results.extend(self._minibatch_inference(i, batches[i]["paths"], batches[i]["frame_meta"], annotated_dir))
-        
         return results
-        # finally:
-        #     profiler.disable()
-            
-        #     # Save profiling stats
-        #     s = StringIO()
-        #     ps = pstats.Stats(profiler, stream=s).sort_stats('cumulative')
-        #     ps.print_stats(50)  # Top 50 functions
-            
-        #     # Save profile to frames directory parent
-        #     timestamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
-        #     profile_output_dir = frames_dir.parent / "profiling"
-        #     print("PROFILING DIR: ", profile_output_dir)
-        #     profile_output_dir.mkdir(parents=True, exist_ok=True)
-        #     profile_file = profile_output_dir / f"run_model_inference_{timestamp}.txt"
-        #     # with open(profile_file, 'w') as f:
-        #     #     f.write(s.getvalue())
-        #     profile_file.write_text(s.getvalue())
-        #     print(f"\n[PROFILING] _run_model_inference profile saved to: {profile_file}")
     
     def _split_into_batches(self, frames_metadata: list): 
         batches = []
@@ -420,21 +397,18 @@ class InferencePipeline:
         total_detections = sum(r["detection_count"] for r in inference_results)
         frames_with_detections = sum(1 for r in inference_results if r["detection_count"] > 0)
         
-        # Count detections per class
         class_counts = {}
-        for result in inference_results:
-            for det in result["detections"]:
-                class_name = det["class_name"]
-                class_counts[class_name] = class_counts.get(class_name, 0) + 1
-        
-        # Calculate average confidence per class
         class_confidences = {}
         for result in inference_results:
+            assert result["detection_count"] == len(result["detections"])
             for det in result["detections"]:
+                # Count detections per class
                 class_name = det["class_name"]
+                class_counts[class_name] = class_counts.get(class_name, 0) + 1
+                # Calculate confidence per class
                 if class_name not in class_confidences:
                     class_confidences[class_name] = []
-                class_confidences[class_name].append(det["confidence"])
+                class_confidences[class_name].append(det["confidence"])                
         
         avg_confidence_per_class = {
             cls: sum(confs) / len(confs) 
