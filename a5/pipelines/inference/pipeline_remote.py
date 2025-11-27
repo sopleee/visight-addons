@@ -148,8 +148,9 @@ class InferencePipeline:
         
         # Step 6: Upload annotated frames to S3
         if s3_client and save_annotated_frames and annotated_dir:
+            print("REACHED THIS PART!", inference_results)
             if self.logger: self.logger.info("\nStep 6: Uploading annotated frames to S3...")
-            else: print("\nStep 6: Uploading annotated frames to S3...")
+            print("\nStep 6: Uploading annotated frames to S3...")
             for result in tqdm(inference_results, desc="Uploading annotated frames"):
                 if result.get("annotated_frame_path"):
                     annotated_path = Path(result["annotated_frame_path"])
@@ -163,7 +164,7 @@ class InferencePipeline:
                     result["annotated_s3_path"] = annotated_s3_path
             
             if self.logger: self.logger.info(f"Uploaded {len(inference_results)} annotated frames to S3")
-            else: print(f"Uploaded {len(inference_results)} annotated frames to S3")
+            print(f"Uploaded {len(inference_results)} annotated frames to S3")
         
         # Step 7: Generate summary statistics
         print("\nStep 7: Generating summary statistics...")

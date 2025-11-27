@@ -25,13 +25,13 @@ class TestRemoteInference:
     def mock_instance(self, mock_dependencies):
         """Create a mock instance with the method"""
         from pipelines.inference.pipeline_remote import InferencePipeline
-        mock_logger = Mock()        
-        instance = InferencePipeline(model_path="fake/path/model.pt", fps=1, batch_size=3, logger=mock_logger)
+        # mock_logger = Mock()        
+        instance = InferencePipeline(model_path="fake/path/model.pt", fps=1, batch_size=3)#, logger=mock_logger)
         mock_dependencies['yolo_class'].assert_called_once_with("fake/path/model.pt")
         mock_dependencies['vp_class'].assert_called_once_with(fps=1)
         assert instance.model == mock_dependencies['yolo_instance']
         assert instance.video_processor == mock_dependencies['vp_instance']
-        assert instance.logger == mock_logger
+        # assert instance.logger == mock_logger
         assert instance.confidence_threshold == 0.5
         assert instance.batch_size == 3
         return instance
@@ -245,6 +245,50 @@ class TestRemoteInference:
         # Verify uploads happened
         assert mock_s3_instance.upload_file.called
         assert mock_s3_instance.put_object.called
+        assert mock_s3_instance.upload_file.call_count == 2
+    
+    @patch('pipelines.inference.pipeline_remote.s3Client')
+    @patch('pipelines.inference.pipeline_remote.tqdm')
+    def test_full_video_inference_with_s3_and_annotated(self, mock_tqdm, mock_s3_class, mock_instance):
+        """Test running inference with S3 upload"""
+        # Setup S3 mock
+        mock_s3_instance = MagicMock()
+        mock_s3_instance.upload_file.return_value = "s3://bucket/path/file.jpg"
+        mock_s3_instance.put_object.return_value = "s3://bucket/path/results.json"
+        mock_s3_class.return_value = mock_s3_instance
+        mock_s3_class.upload_file.return_value = "s3://bucket/path/annotated-path"
+        
+        mock_instance.video_processor.get_video_info.return_value = {"fps": 30, "duration": 10}
+        mock_instance.video_processor.extract_frames.return_value = [
+            {"frame_id": "frame_001", "frame_number": 1, "timestamp": 0.033, "file_path": "/data/frames/frame_001.jpg"}
+        ]
+        
+        # annotated_dir = Path("/data/annotated")
+        
+        mock_inference_results = [
+            {"frame_id": "frame_001", "detection_count": 1, "detections": [{"class_name": "logo", "confidence": 0.9}], "annotated_frame_path":"res_annotated_path"}
+        ]
+        
+        mock_tqdm.side_effect = lambda x, desc: x
+        
+        with patch.object(mock_instance, '_run_model_inference', return_value=mock_inference_results), \
+             patch.object(mock_instance, '_generate_summary_stats', return_value={"total_detections": 1, "total_frames": 1, "frames_with_detections": 1}), \
+             patch.object(mock_instance, '_draw_bounding_boxes', return_value=Path("/data/annotated/frame_001.jpg")):
+            
+            result = mock_instance.run_inference_on_video(
+                video_path="/data/videos/test.mp4",
+                video_id="test_video",
+                s3_bucket="my-bucket",
+                save_annotated_frames=True
+            )
+        
+        # Verify S3 client was created
+        mock_s3_class.assert_called_once_with(buckets=["my-bucket"])
+        
+        # Verify uploads happened
+        assert mock_s3_instance.upload_file.called
+        assert mock_s3_instance.put_object.called
+        assert mock_s3_instance.upload_file.call_count == 3
     
     @patch('pipelines.inference.pipeline_remote.s3Client')
     def test_full_video_inference_with_logger(self, mock_s3, mock_instance):

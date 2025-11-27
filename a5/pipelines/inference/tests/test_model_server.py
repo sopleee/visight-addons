@@ -221,13 +221,35 @@ class TestModelServer:
         
         output_path = tmp_path / "file.mp4"
         
+        result = download_from_google_drive("https://invalid-link.com",str(output_path))
+        
+        assert result is False
+        assert not output_path.exists()
+    
+    def test_download_failed_download(self, mock_requests, mock_extract_file_id, tmp_path):
+        """Test download with invalid link"""
+        from pipelines.inference.model_server import download_from_google_drive
+        
+        # Setup mocks
+        mock_extract_file_id.return_value = "test_file_id"
+        
+        mock_session = MagicMock()
+        mock_response = MagicMock()
+        mock_response.headers.get.return_value = "1024"
+        mock_response.cookies.items.return_value = []
+        mock_response.iter_content.return_value = None # Induce error in download itself
+        
+        mock_session.get.return_value = mock_response
+        mock_requests.Session.return_value = mock_session
+        
+        output_path = tmp_path / "downloaded_file.mp4"
+        
         result = download_from_google_drive(
-            "https://invalid-link.com",
+            "https://drive.google.com/file/d/test_file_id/view",
             str(output_path)
         )
         
         assert result is False
-        assert not output_path.exists()
     
     def test_download_network_error(self, mock_requests, mock_extract_file_id, tmp_path):
         """Test download when network error occurs"""
@@ -301,3 +323,5 @@ class TestModelServer:
         called_url = mock_session.get.call_args_list[0][0][0]
         assert called_url == f"https://drive.google.com/uc?export=download&id={file_id}"
         assert mock_session.get.call_args_list[0][1]["stream"] is True
+        
+        

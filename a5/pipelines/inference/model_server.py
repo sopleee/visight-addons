@@ -76,10 +76,7 @@ def zip_directory(directory_paths, other_paths, zip_path):
     import os
     file_size = os.path.getsize(zip_path)
     print(f"Zip file size: {file_size:,} bytes")
-    
-    if file_size == 0:
-        raise ValueError("Zip file is empty after creation!")
-    
+        
     # Verify it's a valid zip
     with zipfile.ZipFile(zip_path, 'r') as verify_zf:
         file_list = verify_zf.namelist()
@@ -140,7 +137,6 @@ def download_from_google_drive(share_link, output_path):
         
         print(f"\n✓ Downloaded successfully to: {output_path}")
         return True
-        
     except Exception as e:
         print(f"\nError downloading file: {e}")
         return False
@@ -222,11 +218,9 @@ def download_result(job_id: str):
     
     # Return zip file
     zip_path = f"/results/{job_id}.zip"
-    print("status checked", zip_path)
     if not os.path.exists(zip_path): 
         print(f"File DNE: {zip_path}")
         return {"error": "Result file not found"}, 404
-    print("file exists?")
     try:
         with zipfile.ZipFile(zip_path, 'r') as zf:
             num_files = len(zf.namelist())
@@ -235,7 +229,6 @@ def download_result(job_id: str):
             if num_files == 0: return {"error": "Zip file has no contents"}, 500
     except zipfile.BadZipFile as e: return {"error": f"Invalid zip file: {e}"}, 500
 
-    print("zip stuff kinda resolved?")
     # Copy the zip into temp
     temp_zip = tempfile.NamedTemporaryFile(delete=False, suffix='.zip')
     shutil.copy(zip_path, temp_zip.name)
@@ -243,7 +236,6 @@ def download_result(job_id: str):
     os.remove(zip_path)
     results_volume.commit()
     
-    print("os stuff finished")
     # Remove status
     # if job_id in job_status_dict: 
     del job_status_dict[job_id]
@@ -300,7 +292,8 @@ def inference(job_id: str, request: InferenceRequest, save_to_s3: bool = False):
     
     logger.info("Downloading video to Modal container")
     # vid_url = "https://drive.google.com/file/d/1ya6iuzDMhqCSZG8uRpLsvrNeNA77d8Ew/view?usp=sharing"
-    if(download_from_google_drive(request.video_url, local_vid_path) is False): raise Exception("Failed to download link")
+    if(download_from_google_drive(request.video_url, local_vid_path) is False): 
+        raise HTTPException(status_code=400, detail="Failed to download link")
     logger.info("Finished downloading video")
     cur_config = Config(env=ENV)
     
@@ -325,17 +318,17 @@ def inference(job_id: str, request: InferenceRequest, save_to_s3: bool = False):
         )
     except Exception as e: 
         print("error!", e)
-        raise HTTPException(status_code=500)
+        raise HTTPException(status_code=500, detail=f"Exception occurred during video frame processing or model inference: {e}")
 
     zip_path = Path(f"/results/{job_id}.zip")
     logger.info("Started zipping results")  
     try: zip_directory(res_dirs, [res_json_path], zip_path)
-    except Exception as e: raise Exception(f"Error during zip: {e}")
+    except Exception as e: raise HTTPException(status_code=500, detail=f"Error during zip: {e}")
     logger.info("Finished zipping") 
     import os
     file_size = os.path.getsize(zip_path)
     print(f"Zip file size: {file_size:,} bytes")
-    if file_size == 0: raise ValueError("Zip file is empty after creation!")  
+    if file_size == 0: raise HTTPException(status_code=500, detail="Internal error: zip file is empty after creation!")  
     
     results_volume.commit()
              
