@@ -1,0 +1,19 @@
+export const brands = [
+  "1and1", "AMD", "ATandT", "Alfa Romeo", "Alpha Tauri", "Alpinestars",
+  "Aramco", "Arrow Electronics", "Aston Martin", "BWT AG", "Bybit",
+  "Cash App", "Castrol", "Citrix", "Claro", "CrowdStrike", "Crypto-com",
+  "DHL", "DP World", "DuPont", "Emirates", "Epson", "Esso", "Ferrari",
+  "Force India", "Formula 1", "Ftx", "Haas", "Heineken", "Honda", "Ineos",
+  "Infiniti", "Inter", "JCB", "Kaspersky", "Liqui Moly", "McLaren",
+  "Mercedes-Benz", "Microsoft Corporation", "Mobil", "Monster Energy",
+  "Oracle", "Orlen", "Petronas", "Pirelli", "Puma", "RCI Banque",
+  "Randstad Holding", "Rauch", "RayBan", "Red Bull", "Renault",
+  "Richard Mile", "Rolex", "Royal Dutch Shell", "Santander", "Splunk",
+  "TAG Heuer", "TeamViewer", "Telcel", "Tezos", "Tommy Hilfiger", "UBS",
+  "United Parcel Service", "VTB Bank", "Velo", "Vuse", "Williams", "Yahoo",
+  "Zoom", "alpine", "aws", "bose", "darktrace", "dell", "etihad", "fia",
+  "fxpro", "gulf", "hp", "lavazza", "logitech", "stc", "ural kali", "verti",
+  "wallmart"
+] as const;
+
+export type BrandName = (typeof brands)[number];
