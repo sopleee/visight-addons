@@ -11,7 +11,7 @@ export async function POST(req: NextRequest) {
       brand,
       fps = 12,
       confidence_threshold = 0.5,
-      batch_size = 100,
+      batch_size = 30,
     } = body || {};
 
     if (!videoUrl || typeof videoUrl !== "string") {
