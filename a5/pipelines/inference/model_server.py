@@ -26,7 +26,7 @@ INFRASTRUCTURE_CONFIG = {
         "max_containers": 2,
     },
     "prod": {
-        "gpu": "T4",
+        "gpu": "A10",
         "min_containers": 1,
         "max_containers": 20,
     }

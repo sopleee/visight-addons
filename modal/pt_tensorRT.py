@@ -64,7 +64,7 @@ class ConvertSpec:
 @app.function(
     secrets=[s3_secret],
     volumes={MOUNT_PATH: modal.CloudBucketMount(BUCKET_NAME, secret=s3_secret)},
-    gpu="T4",
+    gpu="A10",
     timeout=60 * 60,
 )
 def convert_to_trt(spec: ConvertSpec):
