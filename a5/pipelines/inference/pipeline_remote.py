@@ -175,14 +175,57 @@ class InferencePipeline:
             s3_client.put_object(results_key, results_bytes, content_type='application/json')
             if self.logger: self.logger.info(f"Results JSON uploaded to S3")
 
+        # --- Step 9: Create Annotated Video ---
+        annotated_video_path = None
+        if annotated_dir and annotated_dir.exists():
+            if self.logger: 
+                self.logger.info("\nStep 9: Creating annotated video...")
+            else:
+                print("\nStep 9: Creating annotated video...")
+            
+            video_output_path = data_dir / f"{video_id}_annotated.mp4"
+            
+            success = self.video_processor.create_annotated_video(
+                annotated_frames_dir=str(annotated_dir),
+                output_video_path=str(video_output_path),
+                original_video_path=video_path,
+                fps=video_info['fps'],
+                include_audio=True
+            )
+            
+            if success:
+                annotated_video_path = video_output_path
+                if self.logger:
+                    self.logger.info(f"✓ Annotated video created: {annotated_video_path}")
+                
+                # Upload to S3 if enabled
+                if s3_client:
+                    video_key = f"inference/videos/{video_id}_annotated.mp4"
+                    video_s3_path = s3_client.upload_file(
+                        str(annotated_video_path), 
+                        video_key, 
+                        content_type='video/mp4'
+                    )
+                    if self.logger:
+                        self.logger.info(f"✓ Annotated video uploaded to S3: {video_s3_path}")
+                    pipeline_results["annotated_video_s3_path"] = video_s3_path
+            else:
+                if self.logger:
+                    self.logger.warning("⚠ Failed to create annotated video")
+
         msg = f"\nPipeline Complete. Detections: {summary_stats['total_detections']}"
         if self.logger: self.logger.info(msg)
         
-        # Return directories to zip (Annotated + Profiling)
+        # Return directories to zip (Annotated + Profiling) and files
         profiling_dir = Path("/data/profiling")
-        res_dirs = [d for d in [annotated_dir, profiling_dir] if d is not None and d.exists()]
+        res_dirs = [profiling_dir] if profiling_dir.exists() else []
         
-        return res_dirs, res_json_path
+        # Add video to files list if it exists
+        additional_files = [res_json_path]
+        if annotated_video_path and annotated_video_path.exists():
+            additional_files.append(str(annotated_video_path))
+        
+        return res_dirs, additional_files
 
     @profiled(name="process_batch", stats_limit=20)
     def _process_batch(self, frames: list[np.ndarray], meta: list[dict], 

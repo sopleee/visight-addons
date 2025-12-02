@@ -57,7 +57,7 @@ S3_SECRET = modal.Secret.from_name(
 # Use NVIDIA TensorRT base to get TRT runtime + CUDA libs; install torch/ultralytics on top.
 image = (
     modal.Image.from_registry("nvcr.io/nvidia/tensorrt:24.03-py3")
-    .apt_install(["libgl1-mesa-glx", "libglib2.0-0"])
+    .apt_install(["libgl1-mesa-glx", "libglib2.0-0", "ffmpeg"])
     .pip_install(
         "torch",
         "torchvision",
@@ -399,7 +399,8 @@ def inference(job_id: str, request: InferenceRequest, save_to_s3: bool = False):
     video_id = f"{str(Path(cur_config.model_key).stem)}_{datetime.now().strftime('%Y_%m_%d_%H_%M_%S')}"
     
     try: 
-        res_dirs, res_json_path = pipeline.run_inference_on_video(
+        # CHANGED: Now returns additional_files instead of res_json_path
+        res_dirs, additional_files = pipeline.run_inference_on_video(
             video_path=local_vid_path, 
             video_id=video_id, 
             s3_bucket=cur_config.s3_bucket if save_to_s3 else save_to_s3,
@@ -417,7 +418,8 @@ def inference(job_id: str, request: InferenceRequest, save_to_s3: bool = False):
                 batch_size=min(100, request.batch_size)
             )
             try:
-                res_dirs, res_json_path = fallback_pipeline.run_inference_on_video(
+                # CHANGED: Now returns additional_files
+                res_dirs, additional_files = fallback_pipeline.run_inference_on_video(
                     video_path=local_vid_path, 
                     video_id=video_id, 
                     s3_bucket=cur_config.s3_bucket if save_to_s3 else save_to_s3,
@@ -445,7 +447,8 @@ def inference(job_id: str, request: InferenceRequest, save_to_s3: bool = False):
 
     zip_path = Path(f"/results/{job_id}.zip")
     logger.info("Started zipping results")  
-    try: zip_directory(res_dirs, [res_json_path], zip_path)
+    # CHANGED: Pass additional_files instead of [res_json_path]
+    try: zip_directory(res_dirs, additional_files, zip_path)
     except Exception as e: 
         job_status_dict[job_id] = json.dumps({
             "cur_status": "failed",

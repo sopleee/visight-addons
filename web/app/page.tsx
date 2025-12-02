@@ -337,6 +337,40 @@ export default function Page() {
           </p>
         )}
       </section>
+
+      {/* NEW: Annotated Video Section */}
+      {jobId && status?.cur_status === "completed" && (
+        <section className="glass rounded-2xl p-6 space-y-4">
+          <div className="flex items-center justify-between">
+            <h2 className="text-xl font-semibold text-white">
+              5) Annotated Video
+            </h2>
+            <a
+              href={`/api/jobs/${jobId}/video`}
+              download={`annotated_${jobId}.mp4`}
+              className="text-sm text-white bg-brand-600 hover:bg-brand-700 rounded-lg px-4 py-2 transition"
+            >
+              Download Video
+            </a>
+          </div>
+          
+          <div className="relative rounded-xl overflow-hidden bg-black/50">
+            <video
+              src={`/api/jobs/${jobId}/video`}
+              controls
+              className="w-full"
+              style={{ maxHeight: '600px' }}
+            >
+              Your browser does not support the video tag.
+            </video>
+          </div>
+          
+          <p className="text-sm text-slate-300">
+            Video showing all detected <span className="text-white font-semibold">{brand}</span> logos 
+            with bounding boxes. Includes audio from the original video.
+          </p>
+        </section>
+      )}
     </main>
   );
 }
