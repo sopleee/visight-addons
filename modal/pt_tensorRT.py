@@ -14,6 +14,7 @@ import modal
 from pathlib import Path
 from typing import Optional
 from dataclasses import dataclass
+import shutil
 
 try:
     from configs.config import Config  # running from repo (e.g., cwd=modal/)
@@ -24,6 +25,16 @@ except Exception:
 CONFIG = Config()
 BUCKET_NAME = CONFIG.bucket_name
 MOUNT_PATH = Path("/bucket")
+
+# safe copy helper (avoids permission issues on bucket mounts)
+def _safe_copy(src: Path, dst: Path) -> None:
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        shutil.copy2(src, dst)
+    except PermissionError:
+        shutil.copyfile(src, dst)
+    except Exception:
+        shutil.copyfile(src, dst)
 
 # Match the inference image: TensorRT runtime base + CUDA torch + ultralytics.
 image = (
@@ -59,21 +70,36 @@ class ConvertSpec:
     dynamic: bool = True
     export_onnx: bool = False
     batch: int = 1
+    save_subdir: Optional[str] = None  # optional subfolder under latest_run to place exports
+    save_subdir: Optional[str] = None  # optional subfolder under latest_run to place exports
 
 
 @app.function(
     secrets=[s3_secret],
     volumes={MOUNT_PATH: modal.CloudBucketMount(BUCKET_NAME, secret=s3_secret)},
-    gpu="A10",
+    gpu="T4",
     timeout=60 * 60,
 )
 def convert_to_trt(spec: ConvertSpec):
     from ultralytics import YOLO
 
-    model_dir = MOUNT_PATH / "models" / spec.latest_run
-    pt_path = model_dir / "best.pt"
-    if not pt_path.exists():
-        raise FileNotFoundError(f"best.pt not found at {pt_path}")
+    base_dir = MOUNT_PATH / "models" / spec.latest_run
+    src_pt_path = base_dir / "best.pt"
+    if not src_pt_path.exists():
+        raise FileNotFoundError(f"best.pt not found at {src_pt_path}")
+
+    # Destination directory for exports
+    model_dir = base_dir / spec.save_subdir if spec.save_subdir else base_dir
+    model_dir.mkdir(parents=True, exist_ok=True)
+
+    # If saving under a subdir, copy best.pt there so exports land under that folder
+    if spec.save_subdir:
+        dest_pt = model_dir / "best.pt"
+        if not dest_pt.exists():
+            _safe_copy(src_pt_path, dest_pt)
+        pt_path = dest_pt
+    else:
+        pt_path = src_pt_path
 
     print(f"[convert] Loading {pt_path}")
     model = YOLO(str(pt_path))
@@ -132,7 +158,8 @@ def main(
     half: bool = True,
     dynamic: bool = True,
     export_onnx: bool = False,
-    batch: int = 60
+    batch: int = 40,
+    save_subdir: Optional[str] = None,
 ):
     """
     Launch conversion remotely. Example:
@@ -144,6 +171,7 @@ def main(
         half=half,
         dynamic=dynamic,
         export_onnx=export_onnx,
-        batch=batch
+        batch=batch,
+        save_subdir=save_subdir,
     )
     convert_to_trt.remote(spec)
