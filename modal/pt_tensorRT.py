@@ -132,7 +132,7 @@ def main(
     half: bool = True,
     dynamic: bool = True,
     export_onnx: bool = False,
-    batch: int = 100
+    batch: int = 60
 ):
     """
     Launch conversion remotely. Example:
