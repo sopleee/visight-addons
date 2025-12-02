@@ -14,7 +14,7 @@ type Status = {
 const defaults = {
   fps: 12,
   confidence_threshold: 0.5,
-  batch_size: 100,
+  batch_size: 30,
 };
 
 function formatSeconds(seconds: number): string {
