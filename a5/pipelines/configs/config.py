@@ -7,6 +7,6 @@ class Config:
         if env == "prod": self.s3_bucket = "visight-data-yusufmoola"
         else: self.s3_bucket = "visight-data-yusufmoola"
         self.catalogue_path = f"s3://{self.s3_bucket}/configs"
-        if env == "prod": self.model_key = "models/raw-yolov8s-20251009-171047" 
-        else: self.model_key = "models/raw-yolov8s-20251009-171047" 
+        if env == "prod": self.model_key = "models/augmented-yolov8s-20251119-050448" 
+        else: self.model_key = "models/augmented-yolov8s-20251119-050448" 
        
