@@ -228,7 +228,7 @@ class InferencePipeline:
 
     @profiled(name="process_batch", stats_limit=20)
     def _process_batch(self, frames: list[np.ndarray], meta: list[dict], 
-                       annotated_dir: Path, video_id: str, s3_client: Optional[s3Client]) -> list:
+                       annotated_dir: Path, video_id: str, s3_client: Optional[s3Client]=None) -> list:
         """
         Runs inference on a RAM batch, annotates, and handles S3 uploads for annotated frames.
         """
@@ -303,10 +303,6 @@ class InferencePipeline:
                 if class_name not in class_confidences:
                     class_confidences[class_name] = []
                 class_confidences[class_name].append(det["confidence"])                
-                cname = det["class_name"]
-                class_counts[cname] = class_counts.get(cname, 0) + 1
-                if cname not in class_confidences: class_confidences[cname] = []
-                class_confidences[cname].append(det["confidence"])
         
         avg_conf = {k: sum(v)/len(v) for k, v in class_confidences.items()}
         

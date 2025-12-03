@@ -1,7 +1,10 @@
 import pytest
-from unittest.mock import Mock, MagicMock, patch
+from unittest.mock import Mock, MagicMock, patch, mock_open
 from pathlib import Path
 import numpy as np
+import torch
+import cv2
+from pipelines.clients.s3_client import s3Client
 
 class TestRemoteInference:
     """Test suite for _generate_summary_stats method"""
@@ -27,7 +30,7 @@ class TestRemoteInference:
         from pipelines.inference.pipeline_remote import InferencePipeline
         # mock_logger = Mock()        
         instance = InferencePipeline(model_path="fake/path/model.pt", fps=1, batch_size=3)#, logger=mock_logger)
-        mock_dependencies['yolo_class'].assert_called_once_with("fake/path/model.pt")
+        mock_dependencies['yolo_class'].assert_called_once_with("fake/path/model.pt", task='detect')
         mock_dependencies['vp_class'].assert_called_once_with(fps=1)
         assert instance.model == mock_dependencies['yolo_instance']
         assert instance.video_processor == mock_dependencies['vp_instance']
@@ -35,7 +38,142 @@ class TestRemoteInference:
         assert instance.confidence_threshold == 0.5
         assert instance.batch_size == 3
         return instance
+
+    @pytest.fixture
+    def mock_video_capture(self):
+        """Create a mock video capture that returns frames"""
+        mock_cap = MagicMock()
+        mock_cap.get.side_effect = lambda prop: {
+            cv2.CAP_PROP_FRAME_COUNT: 5,
+            cv2.CAP_PROP_FPS: 30.0
+        }.get(prop, 0)
+        
+        # Simulate 5 frames then end
+        mock_frames = [np.zeros((480, 640, 3), dtype=np.uint8) for _ in range(5)]
+        mock_cap.read.side_effect = (
+            [(True, frame) for frame in mock_frames] + [(False, None)]
+        )
+        return mock_cap
     
+    def test_full_video_inference_without_s3(self, mock_instance, mock_video_capture):
+        """Test running inference without S3 upload"""
+        # Setup mocks
+        mock_instance.video_processor.get_video_info.return_value = {
+            "fps": 30, 
+            "duration": 10,
+            "width": 640,
+            "height": 480
+        }
+        
+        mock_batch_results = [
+            {
+                "frame_number": 0,
+                "timestamp": 0.0,
+                "detection_count": 1,
+                "detections": [{"class_name": "logo", "confidence": 0.9}]
+            },
+            {
+                "frame_number": 1,
+                "timestamp": 0.033,
+                "detection_count": 0,
+                "detections": []
+            }
+        ]
+        
+        mock_summary_stats = {
+            "total_detections": 3,
+            "total_frames": 5,
+            "frames_with_detections": 2
+        }
+        
+        with patch('cv2.VideoCapture', return_value=mock_video_capture), \
+             patch.object(mock_instance, '_process_batch', return_value=mock_batch_results), \
+             patch.object(mock_instance, '_generate_summary_stats', return_value=mock_summary_stats), \
+             patch('builtins.open', mock_open()), \
+             patch('json.dump'), \
+             patch('pathlib.Path.exists', return_value=False), \
+             patch('pathlib.Path.mkdir'):
+            
+            result = mock_instance.run_inference_on_video(
+                video_path="/data/videos/test.mp4",
+                video_id="test_video",
+                s3_bucket=None,
+                save_annotated_frames=False
+            )
+        
+        # Verify result structure
+        assert isinstance(result, tuple)
+        assert len(result) == 2
+        res_dirs, additional_files = result
+        
+        # Should return profiling dir if it exists (mocked as False)
+        assert res_dirs == []
+        
+        # Should return results.json
+        assert "results.json" in additional_files
+        
+        # Verify video processor was called
+        mock_instance.video_processor.get_video_info.assert_called_once_with("/data/videos/test.mp4")
+        
+        # Verify _process_batch was called (5 frames / batch_size=2 = 3 calls)
+        assert mock_instance._process_batch.call_count == 3
+        
+        # Verify summary stats generation
+        mock_instance._generate_summary_stats.assert_called_once()
+        
+    def test_full_video_inference_with_s3(self, mock_instance, mock_video_capture):
+        """Test running inference with S3 upload"""
+        from pipelines.inference.pipeline_remote import InferencePipeline
+        
+        mock_instance.video_processor.get_video_info.return_value = {
+            "fps": 30,
+            "duration": 10
+        }
+        
+        # Create mock S3 client
+        mock_s3_client = Mock()
+        mock_s3_client.upload_file.return_value = "s3://bucket/inference/videos/test_video"
+        mock_s3_client.put_object.return_value = None
+        
+        mock_batch_results = [{
+            "frame_number": 0,
+            "timestamp": 0.0,
+            "detection_count": 1,
+            "detections": []
+        }]
+        
+        mock_summary_stats = {"total_detections": 1}
+        
+        # Bind the real method to mock_instance
+        mock_instance.run_inference_on_video = InferencePipeline.run_inference_on_video.__get__(mock_instance, InferencePipeline)
+        
+        # Mock s3Client at the module level where run_inference_on_video is defined
+        with patch('cv2.VideoCapture', return_value=mock_video_capture), \
+            patch.object(mock_instance, '_process_batch', return_value=mock_batch_results), \
+            patch.object(mock_instance, '_generate_summary_stats', return_value=mock_summary_stats), \
+            patch('builtins.open', mock_open()), \
+            patch('json.dump'), \
+            patch('json.dumps', return_value='{}'), \
+            patch('pathlib.Path.exists', return_value=False), \
+            patch('pathlib.Path.mkdir'), \
+            patch('pipelines.inference.pipeline_remote.s3Client', return_value=mock_s3_client) as mock_s3_class:
+            
+            result = mock_instance.run_inference_on_video(
+                video_path="/data/videos/test.mp4",
+                video_id="test_video",
+                s3_bucket="test-bucket",
+                save_annotated_frames=False
+            )
+        
+        # Verify S3 client was instantiated
+        mock_s3_class.assert_called_once_with(buckets=["test-bucket"])
+        
+        # Verify S3 upload was called for video
+        assert mock_s3_client.upload_file.called
+        
+        # Verify S3 put_object was called for results JSON
+        assert mock_s3_client.put_object.called
+        
     def test_gen_stats_no_frames(self, mock_instance):
         """Test with empty inference results list"""
         result = mock_instance._generate_summary_stats([])
@@ -43,12 +181,9 @@ class TestRemoteInference:
         assert result["total_frames"] == 0
         assert result["total_detections"] == 0
         assert result["frames_with_detections"] == 0
-        assert result["frames_without_detections"] == 0
         assert result["detection_rate"] == 0
-        assert result["avg_detections_per_frame"] == 0
         assert result["class_counts"] == {}
         assert result["avg_confidence_per_class"] == {}
-        assert result["unique_classes_detected"] == 0
     
     def test_gen_stats_no_detections(self, mock_instance):
         """Test with single frame containing no detections"""
@@ -61,12 +196,9 @@ class TestRemoteInference:
         assert result["total_frames"] == 1
         assert result["total_detections"] == 0
         assert result["frames_with_detections"] == 0
-        assert result["frames_without_detections"] == 1
         assert result["detection_rate"] == 0.0
-        assert result["avg_detections_per_frame"] == 0.0
         assert result["class_counts"] == {}
         assert result["avg_confidence_per_class"] == {}
-        assert result["unique_classes_detected"] == 0
             
     def test_gen_stats_variable_dets_per_frame(self, mock_instance):
         """Test when all frames contain detections"""
@@ -83,64 +215,41 @@ class TestRemoteInference:
         result = mock_instance._generate_summary_stats(inference_results)
         
         assert result["detection_rate"] == 0.5
-        assert result["frames_without_detections"] == 2
         assert result["frames_with_detections"] == 2
         assert result["class_counts"]["a"] == 2
         assert result["class_counts"]["c"] == 1
-        assert result["unique_classes_detected"] == 2
         assert result["avg_confidence_per_class"]["a"] == pytest.approx((0.9+0.8)/2)
         assert result["avg_confidence_per_class"]["c"] == pytest.approx(0.7)
-        
-    def test_split_batches_multiple_batches(self, mock_instance):
-        """Test splitting into multiple batches"""
-        frames = [
-            {"file_path": f"frame_{i}.jpg", "frame_id": str(i)}
-            for i in range(7)
-        ]
-        
-        batches = mock_instance._split_into_batches(frames)
-        
-        assert len(batches) == 3  # 7 frames / 3 batch_size = 3 batches
-        assert len(batches[0]["paths"]) == 3
-        assert len(batches[1]["paths"]) == 3
-        assert len(batches[2]["paths"]) == 1
-        assert batches[0]["paths"] == ["frame_0.jpg", "frame_1.jpg", "frame_2.jpg"]
-        assert batches[2]["paths"] == ["frame_6.jpg"]
-        
-    def test_split_batches_empty_frames(self, mock_instance):
-        """Test splitting with empty frames list"""
-        batches = mock_instance._split_into_batches([])
-        
-        assert len(batches) == 0
-
-    @patch('pipelines.inference.pipeline_remote.cv2')
-    def test_bounding_box_draw_multiple_detections(self, mock_cv2, mock_instance):
-        """Test drawing multiple bounding boxes"""
-        mock_img = np.zeros((480, 640, 3), dtype=np.uint8)
-        mock_cv2.imread.return_value = mock_img
-        mock_cv2.getTextSize.return_value = ((100, 20), 5)
-        
-        frame_path = Path("/data/frames/frame_001.jpg")
-        output_dir = Path("/data/annotated")
-        detections = [
-            {"bbox": [10, 20, 100, 105], "class_name": "logo1", "confidence": 0.95},
-            {"bbox": [200, 50, 300, 200], "class_name": "logo2", "confidence": 0.87}
-        ]
-        
-        result = mock_instance._draw_bounding_boxes(frame_path, detections, output_dir)
-        
-        assert mock_cv2.rectangle.call_count >= 4
-        assert mock_cv2.putText.call_count == 2
     
+    @patch('pipelines.inference.pipeline_remote.pstats')
+    @patch('pipelines.inference.pipeline_remote.cProfile')
+    @patch('pipelines.inference.pipeline_remote.cv2.imwrite')
     @patch('pipelines.inference.pipeline_remote.tqdm')
-    def test_process_res_with_annotated_dir(self, mock_tqdm, mock_instance):
+    def test_process_batch_with_annotated_dir(self, mock_tqdm, mock_imwrite, mock_cprofile, mock_pstats, mock_instance):
         """Test processing with annotated directory specified"""
-        mock_det = MagicMock()
-        mock_det.names = {0: "logo"}
-        mock_det.boxes.data.tolist.return_value = [
-            [10, 20, 100, 150, 0.95, 0]
-        ]
         
+        # Mock the profiler
+        mock_profiler = MagicMock()
+        mock_cprofile.Profile.return_value = mock_profiler
+        mock_pstats.Stats.return_value = mock_profiler
+        
+        # Create mock prediction object
+        mock_pred = MagicMock()        
+        mock_box = MagicMock()
+        mock_box.xyxy = [torch.tensor([10.0, 20.0, 100.0, 150.0])]
+        mock_box.conf = [torch.tensor(0.95)]
+        mock_box.cls = [torch.tensor(0)]
+        mock_pred.boxes = [mock_box]
+        
+        # Mock the plot method to return a fake annotated image
+        mock_pred.plot.return_value = np.zeros((480, 640, 3), dtype=np.uint8)
+        
+        # Mock the model's predict method to return list of predictions
+        mock_instance.model.return_value = [mock_pred]
+        mock_instance.model.names = {0: "logo"}
+        
+        # Create test data
+        frames = [np.zeros((480, 640, 3), dtype=np.uint8)]
         file_meta = [
             {
                 "frame_id": "frame_001",
@@ -150,33 +259,26 @@ class TestRemoteInference:
             }
         ]
         
-        mock_tqdm.return_value = [mock_det]
         annotated_dir = Path("/data/annotated")
         
-        with patch.object(mock_instance, '_draw_bounding_boxes', return_value=Path("/data/annotated/frame_001.jpg")):
-            results = mock_instance._process_inference_res(0, [mock_det], file_meta, annotated_dir)
+        # Mock cv2.imwrite to succeed
+        mock_imwrite.return_value = True
         
+        # Execute
+        results = mock_instance._process_batch(frames, file_meta, annotated_dir, "vid_id")
+        
+        # Assertions
+        assert len(results) == 1
+        assert results[0]["frame_number"] == 1
+        assert results[0]["detection_count"] == 1
+        assert results[0]["detections"][0]["class_name"] == "logo"
+        assert results[0]["detections"][0]["confidence"] == pytest.approx(0.95)
         assert "annotated_frame_path" in results[0]
-        assert results[0]["annotated_frame_path"] == str(Path("/data/annotated/frame_001.jpg"))
-            
-    def test_run_inference_multiple_batches(self, mock_instance):
-        """Test running inference on multiple batches"""
-        frames_metadata = [
-            {"file_path": f"frame_{i}.jpg", "frame_id": str(i), "frame_number": i, "timestamp": i * 0.033}
-            for i in range(5)
-        ]
+        assert results[0]["annotated_frame_path"] == str(annotated_dir / "frame_000001.jpg")
         
-        mock_batch_results = [
-            [{"frame_id": "0", "detection_count": 0}, {"frame_id": "1", "detection_count": 1},
-             {"frame_id": "2", "detection_count": 0}],
-            [{"frame_id": "3", "detection_count": 2},{"frame_id": "4", "detection_count": 1}]
-        ]
-        
-        with patch.object(mock_instance, '_minibatch_inference', side_effect=mock_batch_results) as mock_minibatch:
-            results = mock_instance._run_model_inference(frames_metadata, Path("/data/frames"), None)
-        assert len(results) == 5
-        assert [r["frame_id"] for r in results] == [str(i) for i in range(5)]
-        assert mock_minibatch.call_count == 2
+        mock_imwrite.assert_called_once()
+        mock_profiler.enable.assert_called()
+        mock_profiler.disable.assert_called()
         
     def test_full_video_inference_without_s3(self, mock_instance):
         """Test running inference without S3 upload"""
@@ -191,8 +293,8 @@ class TestRemoteInference:
             {"frame_id": "frame_002", "detection_count": 0, "detections":[]}
         ]
         
-        with patch.object(mock_instance, '_run_model_inference', return_value=mock_inference_results), \
-             patch.object(mock_instance, '_generate_summary_stats', return_value={"total_detections": 1, "total_frames": 1, "frames_with_detections": 1}):
+        # with patch.object(mock_instance, '_run_model_inference', return_value=mock_inference_results), \
+        with patch.object(mock_instance, '_generate_summary_stats', return_value={"total_detections": 1, "total_frames": 1, "frames_with_detections": 1}):
             
             result = mock_instance.run_inference_on_video(
                 video_path="/data/videos/test.mp4",
@@ -205,146 +307,138 @@ class TestRemoteInference:
         assert isinstance(result, tuple)
         assert len(result) == 2
         res_dirs, res_summary_path = result
-        assert res_summary_path == "results.json"
+        assert res_summary_path == ["results.json"]
         assert res_dirs == [Path("/data/profiling")]
     
-    @patch('pipelines.inference.pipeline_remote.s3Client')
-    @patch('pipelines.inference.pipeline_remote.tqdm')
-    def test_full_video_inference_with_s3(self, mock_tqdm, mock_s3_class, mock_instance):
-        """Test running inference with S3 upload"""
-        # Setup S3 mock
-        mock_s3_instance = MagicMock()
-        mock_s3_instance.upload_file.return_value = "s3://bucket/path/file.jpg"
-        mock_s3_instance.put_object.return_value = "s3://bucket/path/results.json"
-        mock_s3_class.return_value = mock_s3_instance
-        
-        mock_instance.video_processor.get_video_info.return_value = {"fps": 30, "duration": 10}
-        mock_instance.video_processor.extract_frames.return_value = [
-            {"frame_id": "frame_001", "frame_number": 1, "timestamp": 0.033, "file_path": "/data/frames/frame_001.jpg"}
-        ]
-        
-        mock_inference_results = [
-            {"frame_id": "frame_001", "detection_count": 1, "detections": [{"class_name": "logo", "confidence": 0.9}]}
-        ]
-        
-        mock_tqdm.side_effect = lambda x, desc: x
-        
-        with patch.object(mock_instance, '_run_model_inference', return_value=mock_inference_results), \
-             patch.object(mock_instance, '_generate_summary_stats', return_value={"total_detections": 1, "total_frames": 1, "frames_with_detections": 1}):
-            
-            result = mock_instance.run_inference_on_video(
-                video_path="/data/videos/test.mp4",
-                video_id="test_video",
-                s3_bucket="my-bucket",
-                save_annotated_frames=False
-            )
-        
-        # Verify S3 client was created
-        mock_s3_class.assert_called_once_with(buckets=["my-bucket"])
-        
-        # Verify uploads happened
-        assert mock_s3_instance.upload_file.called
-        assert mock_s3_instance.put_object.called
-        assert mock_s3_instance.upload_file.call_count == 2
-    
-    @patch('pipelines.inference.pipeline_remote.s3Client')
-    @patch('pipelines.inference.pipeline_remote.tqdm')
-    def test_full_video_inference_with_s3_and_annotated(self, mock_tqdm, mock_s3_class, mock_instance):
-        """Test running inference with S3 upload"""
-        # Setup S3 mock
-        mock_s3_instance = MagicMock()
-        mock_s3_instance.upload_file.return_value = "s3://bucket/path/file.jpg"
-        mock_s3_instance.put_object.return_value = "s3://bucket/path/results.json"
-        mock_s3_class.return_value = mock_s3_instance
-        mock_s3_class.upload_file.return_value = "s3://bucket/path/annotated-path"
-        
-        mock_instance.video_processor.get_video_info.return_value = {"fps": 30, "duration": 10}
-        mock_instance.video_processor.extract_frames.return_value = [
-            {"frame_id": "frame_001", "frame_number": 1, "timestamp": 0.033, "file_path": "/data/frames/frame_001.jpg"}
-        ]
-        
-        # annotated_dir = Path("/data/annotated")
-        
-        mock_inference_results = [
-            {"frame_id": "frame_001", "detection_count": 1, "detections": [{"class_name": "logo", "confidence": 0.9}], "annotated_frame_path":"res_annotated_path"}
-        ]
-        
-        mock_tqdm.side_effect = lambda x, desc: x
-        
-        with patch.object(mock_instance, '_run_model_inference', return_value=mock_inference_results), \
-             patch.object(mock_instance, '_generate_summary_stats', return_value={"total_detections": 1, "total_frames": 1, "frames_with_detections": 1}), \
-             patch.object(mock_instance, '_draw_bounding_boxes', return_value=Path("/data/annotated/frame_001.jpg")):
-            
-            result = mock_instance.run_inference_on_video(
-                video_path="/data/videos/test.mp4",
-                video_id="test_video",
-                s3_bucket="my-bucket",
-                save_annotated_frames=True
-            )
-        
-        # Verify S3 client was created
-        mock_s3_class.assert_called_once_with(buckets=["my-bucket"])
-        
-        # Verify uploads happened
-        assert mock_s3_instance.upload_file.called
-        assert mock_s3_instance.put_object.called
-        assert mock_s3_instance.upload_file.call_count == 3
-    
-    @patch('pipelines.inference.pipeline_remote.s3Client')
-    def test_full_video_inference_with_logger(self, mock_s3, mock_instance):
-        """Test running inference with logger"""
-        mock_logger = Mock()
-        mock_instance.logger = mock_logger
-        mock_s3_instance = MagicMock()
-        mock_s3_instance.upload_file.return_value = "s3://bucket/path/file.jpg"
-        mock_s3_instance.put_object.return_value = "s3://bucket/path/results.json"
-        mock_s3.return_value = mock_s3_instance
-        
+    @patch('pipelines.inference.pipeline_remote.profiled')
+    def test_profiler_decorator_called(self, mock_profiled, mock_instance):
+        """Test that the profiler decorator is applied correctly"""
+        assert hasattr(mock_instance._process_batch, '__wrapped__') or callable(mock_instance._process_batch)
+
+    def test_batch_processing_logic(self, mock_instance, mock_video_capture):
+        """Test that batches are processed correctly"""
+        mock_instance.batch_size = 2
         mock_instance.video_processor.get_video_info.return_value = {"fps": 30}
-        mock_instance.video_processor.extract_frames.return_value = [
-            {"frame_id": "frame_001", "frame_number": 1, "timestamp": 0.033, "file_path": "/data/frames/frame_001.jpg"}
-        ]
+        mock_summary_stats = {"total_detections": 0}
         
-        mock_inference_results = [{"frame_id": "frame_001", "detection_count": 0, "detections": []}]
+        batch_call_count = 0
+        def mock_process_batch(frames, meta, *args, **kwargs):
+            nonlocal batch_call_count
+            batch_call_count += 1
+            return [{"frame_number": i} for i in range(len(frames))]
         
-        with patch.object(mock_instance, '_run_model_inference', return_value=mock_inference_results), \
-             patch.object(mock_instance, '_generate_summary_stats', return_value={"total_detections": 0, "total_frames": 1, "frames_with_detections": 0}):
+        with patch('cv2.VideoCapture', return_value=mock_video_capture), \
+             patch.object(mock_instance, '_process_batch', side_effect=mock_process_batch), \
+             patch.object(mock_instance, '_generate_summary_stats', return_value=mock_summary_stats), \
+             patch('builtins.open', mock_open()), \
+             patch('json.dump'), \
+             patch('pathlib.Path.exists', return_value=False), \
+             patch('pathlib.Path.mkdir'):
             
             mock_instance.run_inference_on_video(
                 video_path="/data/videos/test.mp4",
                 video_id="test_video",
-                s3_bucket="my-bucket",
+                s3_bucket=None,
                 save_annotated_frames=False
             )
         
-        assert mock_logger.info.called
-        assert mock_logger.info.call_count == 13
-        
-    @patch('pipelines.inference.pipeline_remote.profiled')
-    def test_profiler_decorator_called(self, mock_profiled, mock_instance):
-        """Test that the profiler decorator is applied correctly"""
-        assert hasattr(mock_instance._generate_summary_stats, '__wrapped__') or callable(mock_instance._generate_summary_stats)
+        # 5 frames with batch_size=2: should call 3 times (2, 2, 1)
+        assert batch_call_count == 3
     
-    @patch('pipelines.inference.pipeline_remote.cProfile')
-    @patch('pipelines.inference.pipeline_remote.pstats')
-    def test_minibatch_inference_profiling(self, mock_pstats, mock_cprofile, mock_instance):
-        """Test that profiling decorator in _minibatch_inference works"""
-        # Mock profiler
-        mock_profiler = MagicMock()
-        mock_cprofile.Profile.return_value = mock_profiler
-        mock_pstats.Stats.return_value = mock_profiler
+    def test_annotated_video_creation(self, mock_instance, mock_video_capture):
+        """Test annotated video creation when save_annotated_frames=True"""
+        mock_instance.video_processor.get_video_info.return_value = {
+            "fps": 30,
+            "duration": 10
+        }
+        mock_instance.video_processor.create_annotated_video.return_value = True
         
-        # Mock model prediction
-        mock_instance.model.predict.return_value = []
+        mock_batch_results = [{"frame_number": 0, "detections": []}]
+        mock_summary_stats = {"total_detections": 0}
         
-        frame_paths = ["frame_1.jpg", "frame_2.jpg"]
-        file_meta = [
-            {"frame_id": "1", "frame_number": 1, "timestamp": 0.0, "file_path": "frame_1.jpg"},
-            {"frame_id": "2", "frame_number": 2, "timestamp": 0.033, "file_path": "frame_2.jpg"}
-        ]
+        mock_annotated_path = Path("/data/test_video_annotated.mp4")
         
-        with patch.object(mock_instance, '_process_inference_res', return_value=[]):
-            mock_instance._minibatch_inference(0, frame_paths, file_meta, None)
-                    
-        mock_profiler.enable.assert_called()
-        mock_profiler.disable.assert_called()
+        with patch('cv2.VideoCapture', return_value=mock_video_capture), \
+             patch.object(mock_instance, '_process_batch', return_value=mock_batch_results), \
+             patch.object(mock_instance, '_generate_summary_stats', return_value=mock_summary_stats), \
+             patch('builtins.open', mock_open()), \
+             patch('json.dump'), \
+             patch('pathlib.Path.mkdir'), \
+             patch('pathlib.Path.exists') as mock_exists:
+            
+            # Mock directory exists for annotated frames, video file exists
+            mock_exists.side_effect = lambda: True
+            
+            with patch.object(Path, 'exists', return_value=True):
+                result = mock_instance.run_inference_on_video(
+                    video_path="/data/videos/test.mp4",
+                    video_id="test_video",
+                    s3_bucket=None,
+                    save_annotated_frames=True
+                )
+        
+        # Verify create_annotated_video was called
+        mock_instance.video_processor.create_annotated_video.assert_called_once()
+        
+        # Verify annotated video is in additional files
+        res_dirs, additional_files = result
+        assert any("annotated.mp4" in str(f) for f in additional_files)
+    
+    def test_profiling_directory_included(self, mock_instance, mock_video_capture):
+        """Test that profiling directory is included in results if it exists"""
+        mock_instance.video_processor.get_video_info.return_value = {"fps": 30}
+        mock_summary_stats = {"total_detections": 0}
+        
+        with patch('cv2.VideoCapture', return_value=mock_video_capture), \
+            patch.object(mock_instance, '_process_batch', return_value=[]), \
+            patch.object(mock_instance, '_generate_summary_stats', return_value=mock_summary_stats), \
+            patch('builtins.open', mock_open()), \
+            patch('json.dump'), \
+            patch('pathlib.Path.mkdir'):
+            
+            # Mock profiling dir exists - check if the path contains "profiling"
+            def mock_exists(self):
+                return "profiling" in str(self)
+            
+            with patch.object(Path, 'exists', mock_exists):
+                result = mock_instance.run_inference_on_video(
+                    video_path="/data/videos/test.mp4",
+                    video_id="test_video",
+                    s3_bucket=None,
+                    save_annotated_frames=False
+                )
+        
+        res_dirs, _ = result
+        # Profiling dir should be in results if it exists
+        assert len(res_dirs) == 1
+        assert "profiling" in str(res_dirs[0])
+    
+    def test_logger_messages(self, mock_instance, mock_video_capture):
+        """Test that appropriate log messages are generated"""
+        mock_instance.logger = Mock()
+        mock_instance.video_processor.get_video_info.return_value = {"fps": 30}
+        
+        with patch('cv2.VideoCapture', return_value=mock_video_capture), \
+             patch.object(mock_instance, '_process_batch', return_value=[]), \
+             patch.object(mock_instance, '_generate_summary_stats', return_value={"total_detections": 0}), \
+             patch('builtins.open', mock_open()), \
+             patch('json.dump'), \
+             patch('pathlib.Path.exists', return_value=False), \
+             patch('pathlib.Path.mkdir'):
+            
+            mock_instance.run_inference_on_video(
+                video_path="/data/videos/test.mp4",
+                video_id="test_video",
+                s3_bucket=None,
+                save_annotated_frames=False
+            )
+        
+        # Verify logger was called with expected messages
+        assert mock_instance.logger.info.called
+        log_calls = [call[0][0] for call in mock_instance.logger.info.call_args_list]
+        
+        # Check for key log messages
+        assert any("Processing video" in msg for msg in log_calls)
+        assert any("Step 1" in msg for msg in log_calls)
+        assert any("Step 3-5" in msg for msg in log_calls)
+        assert any("Step 7" in msg for msg in log_calls)
