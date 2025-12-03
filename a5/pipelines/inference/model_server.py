@@ -94,18 +94,15 @@ def zip_directory(directory_paths, other_paths, zip_path):
     import os
     file_size = os.path.getsize(zip_path)
     print(f"Zip file size: {file_size:,} bytes")
-    
-    if file_size == 0:
-        raise ValueError("Zip file is empty after creation!")
-    
+        
     # Verify it's a valid zip
     with zipfile.ZipFile(zip_path, 'r') as verify_zf:
         file_list = verify_zf.namelist()
         print(f"Verified {len(file_list)} files in zip")
         if len(file_list) == 0:
             raise ValueError("Zip file has no contents!")
-    import os
-    os.sync()
+    # import os
+    # os.sync()
 
 def download_from_google_drive(share_link, output_path):
     """
@@ -126,7 +123,11 @@ def download_from_google_drive(share_link, output_path):
     url = f"https://drive.google.com/uc?export=download&id={file_id}"
     
     session = requests.Session()
-    response = session.get(url, stream=True)
+    try: 
+        response = session.get(url, stream=True)
+    except Exception as e:
+        print(f"\nNetwork related error: {e}")
+        return False
     
     # Handle large files that require confirmation
     for key, value in response.cookies.items():
@@ -154,7 +155,6 @@ def download_from_google_drive(share_link, output_path):
         
         print(f"\n✓ Downloaded successfully to: {output_path}")
         return True
-        
     except Exception as e:
         print(f"\nError downloading file: {e}")
         return False
@@ -222,7 +222,8 @@ def submit_job(request: InferenceRequest, save_to_s3: bool = False):
         "cur_status_progress": 100, 
         "updated_at": datetime.now().isoformat(),
         "call_id": getattr(call, "object_id", None)
-    }) # json.dumps
+    })
+    print("job_id:", job_id)
     return {"job_id": job_id, "call_id": getattr(call, "object_id", None)}
 
 @app.function()
@@ -230,10 +231,12 @@ def submit_job(request: InferenceRequest, save_to_s3: bool = False):
 @modal.concurrent(max_inputs=100)
 def check_status(job_id: str):
     """Check job status and progress"""
+
     import json
     from datetime import datetime
     import modal
     from modal.exception import OutputExpiredError
+    
     print(f"check_status - job_id: '{job_id}' (len={len(job_id)})")
     print(f"check_status - job_id type: {type(job_id)}")
     print(f"check_status - job_id repr: {repr(job_id)}")
@@ -310,7 +313,6 @@ def download_result(job_id: str):
     if not os.path.exists(zip_path): 
         print(f"File DNE: {zip_path}")
         return {"error": "Result file not found"}, 404
-    
     try:
         with zipfile.ZipFile(zip_path, 'r') as zf:
             num_files = len(zf.namelist())
@@ -325,12 +327,42 @@ def download_result(job_id: str):
     
     # Keep the zip and status for repeated downloads/debug
     results_volume.commit()
-
+    
+    # Remove status
+    del job_status_dict[job_id]
+    
     return FileResponse(
         temp_zip.name,
         media_type="application/zip",
         filename=f"results_{job_id}.zip"
     )
+
+@app.function(volumes={"/results": results_volume})
+@modal.fastapi_endpoint(method="GET")
+def debug_list_volume_contents():
+    """Debug: List everything in the volume"""
+    import os
+    
+    if not os.path.exists("/results"):
+        return {"error": "/results doesn't exist", "exists": False}
+    
+    files = []
+    for filename in os.listdir("/results"):
+        filepath = os.path.join("/results", filename)
+        size = os.path.getsize(filepath) if os.path.isfile(filepath) else 0
+        files.append({
+            "name": filename,
+            "size": size,
+            "is_file": os.path.isfile(filepath)
+        })
+    
+    return {
+        "directory": "/results",
+        "exists": True,
+        "total_files": len(files),
+        "files": files
+    }
+
 
 @app.function(
     **INFRASTRUCTURE_CONFIG[ENV],
@@ -342,7 +374,7 @@ def download_result(job_id: str):
 )
 def inference(job_id: str, request: InferenceRequest, save_to_s3: bool = False): 
     from pipelines.inference.pipeline_remote import InferencePipeline
-    from pipelines.configs.config import Config
+    from a5.pipelines.configs.config import Config
     from datetime import datetime
     from fastapi import HTTPException
     import json
@@ -358,6 +390,7 @@ def inference(job_id: str, request: InferenceRequest, save_to_s3: bool = False):
     logger.info(f"[{job_id}] status set to running")
 
     logger.info("Downloading video to Modal container")
+    # sample_vid = "https://drive.google.com/file/d/1ya6iuzDMhqCSZG8uRpLsvrNeNA77d8Ew/view?usp=sharing"
     ok = download_video(request.video_url, local_vid_path)
     if not ok:
         logger.error(f"Failed to download video from {request.video_url}")
@@ -395,7 +428,6 @@ def inference(job_id: str, request: InferenceRequest, save_to_s3: bool = False):
             weights_path = pt_path
         else:
             raise
-        
     video_id = f"{str(Path(cur_config.model_key).stem)}_{datetime.now().strftime('%Y_%m_%d_%H_%M_%S')}"
     
     try: 
@@ -434,7 +466,7 @@ def inference(job_id: str, request: InferenceRequest, save_to_s3: bool = False):
                     "error": str(e2),
                     "updated_at": datetime.now().isoformat()
                 })
-                raise HTTPException(status_code=500)
+                raise HTTPException(status_code=500, detail=f"Exception occurred during video frame processing or model inference: {e2}")
         else:
             print("error!", e)
             job_status_dict[job_id] = json.dumps({
@@ -443,7 +475,7 @@ def inference(job_id: str, request: InferenceRequest, save_to_s3: bool = False):
                 "error": str(e),
                 "updated_at": datetime.now().isoformat()
             })
-            raise HTTPException(status_code=500)
+            raise HTTPException(status_code=500, detail=f"Exception occurred during video frame processing or model inference: {e}")
 
     zip_path = Path(f"/results/{job_id}.zip")
     logger.info("Started zipping results")  
@@ -456,12 +488,13 @@ def inference(job_id: str, request: InferenceRequest, save_to_s3: bool = False):
             "error": f"zip error: {e}",
             "updated_at": datetime.now().isoformat()
         })
-        raise Exception(f"Error during zip: {e}")
+        raise HTTPException(status_code=500, detail=f"Error during zip: {e}")
+
     logger.info("Finished zipping") 
     import os
     file_size = os.path.getsize(zip_path)
     print(f"Zip file size: {file_size:,} bytes")
-    if file_size == 0: raise ValueError("Zip file is empty after creation!")  
+    if file_size == 0: raise HTTPException(status_code=500, detail="Internal error: zip file is empty after creation!")  
     
     results_volume.commit()
              
@@ -471,29 +504,3 @@ def inference(job_id: str, request: InferenceRequest, save_to_s3: bool = False):
         "updated_at": datetime.now().isoformat()
     })
     logger.info(f"[{job_id}] status set to completed")
-
-@app.function(volumes={"/results": results_volume})
-@modal.fastapi_endpoint(method="GET")
-def debug_list_volume_contents():
-    """Debug: List everything in the volume"""
-    import os
-    
-    if not os.path.exists("/results"):
-        return {"error": "/results doesn't exist", "exists": False}
-    
-    files = []
-    for filename in os.listdir("/results"):
-        filepath = os.path.join("/results", filename)
-        size = os.path.getsize(filepath) if os.path.isfile(filepath) else 0
-        files.append({
-            "name": filename,
-            "size": size,
-            "is_file": os.path.isfile(filepath)
-        })
-    
-    return {
-        "directory": "/results",
-        "exists": True,
-        "total_files": len(files),
-        "files": files
-    }

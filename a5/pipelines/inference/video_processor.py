@@ -9,7 +9,6 @@ from datetime import datetime, timezone
 import json
 import subprocess
 
-
 class VideoProcessor:
     
     def __init__(self, fps: Optional[int] = None):
