@@ -528,7 +528,7 @@ class TestTrainYolo:
                     from training import train_yolo
 
                     # Call the function
-                    train_yolo(
+                    train_yolo.local(
                         dataset_version="raw",
                         model_size="yolov8s.pt",
                         epochs=1,
@@ -589,7 +589,7 @@ class TestTrainYolo:
                 with patch.dict("os.environ", {}, clear=True):
                     from training import train_yolo
 
-                    train_yolo(
+                    train_yolo.local(
                         dataset_version="v1",
                         use_wandb=True,
                         export_to_onnx=True,
@@ -646,7 +646,7 @@ class TestTrainYolo:
                 with patch.dict("os.environ", {}, clear=True):
                     from training import train_yolo_backup
 
-                    train_yolo_backup(
+                    train_yolo_backup.local(
                         dataset_version="raw",
                         epochs=5,
                         plots=True,
