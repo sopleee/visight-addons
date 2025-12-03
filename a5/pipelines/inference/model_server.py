@@ -374,7 +374,7 @@ def debug_list_volume_contents():
 )
 def inference(job_id: str, request: InferenceRequest, save_to_s3: bool = False): 
     from pipelines.inference.pipeline_remote import InferencePipeline
-    from pipelines.configs.config import Config
+    from a5.pipelines.configs.config import Config
     from datetime import datetime
     from fastapi import HTTPException
     import json
