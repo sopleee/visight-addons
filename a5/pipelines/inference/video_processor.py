@@ -7,6 +7,7 @@ import hashlib
 from typing import Optional, List
 from datetime import datetime, timezone
 import json
+import subprocess
 
 class VideoProcessor:
     
@@ -136,4 +137,153 @@ class VideoProcessor:
             "duration_seconds": round(duration, 2),
             "resolution": f"{width}x{height}"
         }
-
+    
+    def create_annotated_video(
+        self,
+        annotated_frames_dir: str,
+        output_video_path: str,
+        original_video_path: str,
+        fps: float,
+        include_audio: bool = True
+    ) -> bool:
+        """
+        Create a video from annotated frames with optional audio from original video.
+        
+        Args:
+            annotated_frames_dir: Directory containing annotated frames (frame_000000.jpg, etc.)
+            output_video_path: Path where the output video will be saved
+            original_video_path: Path to original video (for audio extraction)
+            fps: Frame rate for the output video
+            include_audio: Whether to include audio from original video
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        annotated_dir = Path(annotated_frames_dir)
+        output_path = Path(output_video_path)
+        
+        if not annotated_dir.exists():
+            print(f"Error: Annotated frames directory not found: {annotated_dir}")
+            return False
+        
+        # Check if frames exist
+        frame_files = sorted(annotated_dir.glob("frame_*.jpg"))
+        if not frame_files:
+            print(f"Error: No annotated frames found in {annotated_dir}")
+            return False
+        
+        print(f"Found {len(frame_files)} annotated frames")
+        
+        try:
+            if include_audio:
+                # Two-step process: create video, then add audio
+                temp_video = output_path.parent / f"{output_path.stem}_temp.mp4"
+                
+                # Step 1: Create video from frames
+                print("Step 1: Creating video from frames...")
+                frames_cmd = [
+                    'ffmpeg',
+                    '-y',  # Overwrite output file
+                    '-framerate', str(fps),
+                    '-pattern_type', 'glob',
+                    '-i', str(annotated_dir / 'frame_*.jpg'),
+                    '-c:v', 'libx264',
+                    '-pix_fmt', 'yuv420p',
+                    '-preset', 'medium',
+                    '-crf', '23',
+                    str(temp_video)
+                ]
+                
+                result = subprocess.run(
+                    frames_cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=300  # 5 minute timeout
+                )
+                
+                if result.returncode != 0:
+                    print(f"FFmpeg frames error: {result.stderr}")
+                    return False
+                
+                print(f"✓ Created video without audio: {temp_video}")
+                
+                # Step 2: Add audio from original video
+                print("Step 2: Adding audio from original video...")
+                audio_cmd = [
+                    'ffmpeg',
+                    '-y',
+                    '-i', str(temp_video),
+                    '-i', str(original_video_path),
+                    '-c:v', 'copy',
+                    '-c:a', 'aac',
+                    '-map', '0:v:0',  # video from first input
+                    '-map', '1:a:0?',  # audio from second input (optional)
+                    '-shortest',  # match shortest stream
+                    str(output_path)
+                ]
+                
+                result = subprocess.run(
+                    audio_cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=300
+                )
+                
+                # Clean up temp file
+                if temp_video.exists():
+                    temp_video.unlink()
+                
+                if result.returncode != 0:
+                    print(f"FFmpeg audio warning: {result.stderr}")
+                    # If audio merge fails, just use the video without audio
+                    if temp_video.exists():
+                        temp_video.rename(output_path)
+                    print("⚠ Created video without audio (audio merge failed)")
+                else:
+                    print(f"✓ Created video with audio: {output_path}")
+            
+            else:
+                # Direct creation without audio
+                print("Creating video without audio...")
+                cmd = [
+                    'ffmpeg',
+                    '-y',
+                    '-framerate', str(fps),
+                    '-pattern_type', 'glob',
+                    '-i', str(annotated_dir / 'frame_*.jpg'),
+                    '-c:v', 'libx264',
+                    '-pix_fmt', 'yuv420p',
+                    '-preset', 'medium',
+                    '-crf', '23',  # Quality: 0 (lossless) to 51 (worst), 23 is default
+                    str(output_path)
+                ]
+                
+                result = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=300
+                )
+                
+                if result.returncode != 0:
+                    print(f"FFmpeg error: {result.stderr}")
+                    return False
+                
+                print(f"✓ Created video: {output_path}")
+            
+            # Verify the video was created
+            if not output_path.exists():
+                print(f"Error: Output video not found at {output_path}")
+                return False
+            
+            file_size = output_path.stat().st_size
+            print(f"Video size: {file_size:,} bytes ({file_size / (1024*1024):.2f} MB)")
+            
+            return True
+            
+        except subprocess.TimeoutExpired:
+            print("Error: FFmpeg timed out (>5 minutes)")
+            return False
+        except Exception as e:
+            print(f"Error creating video: {e}")
+            return False

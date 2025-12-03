@@ -4,7 +4,7 @@ import modal
 from datetime import datetime
 import json
 from pathlib import Path
-from unittest.mock import patch, Mock
+from unittest.mock import patch, Mock, MagicMock
 import zipfile
 import shutil
 from fastapi import HTTPException
@@ -65,6 +65,7 @@ class TestModalApp:
 
     @patch('pipelines.inference.model_server.inference.spawn')
     def test_submit_creates_job_status(self, mock_spawn, sample_request):
+        mock_spawn.return_value = 3
         result = submit_job.local(sample_request, save_to_s3=False)
         job_id = result["job_id"]
         
@@ -72,24 +73,26 @@ class TestModalApp:
         assert status["cur_status"] == "submitted"
         assert status["cur_status_progress"] == 100
     
-    def test_check_status_existing_job(self):
-        """Test checking status of an existing job"""
+    def test_check_status_with_call_id(self):
+        """Test checking status with a Modal call_id"""
         import uuid
         job_id = str(uuid.uuid4())
+        call_id = "fc-123456"
         
-        # Setup job status
         job_status_dict[job_id] = json.dumps({
-            "cur_status": "processing",
-            "cur_status_progress": 50,
+            "cur_status": "submitted",
+            "call_id": call_id,
             "updated_at": datetime.now().isoformat()
         })
         
-        # Check status using .local()
-        result = check_status.local(job_id=job_id)
-        
-        status = json.loads(result)
-        assert status["cur_status"] == "processing"
-        assert status["cur_status_progress"] == 50
+        with patch('modal.FunctionCall.from_id') as mock_from_id:
+            mock_call = MagicMock()
+            mock_call.get.side_effect = TimeoutError()  # Simulate still running
+            mock_from_id.return_value = mock_call
+            
+            result = check_status.local(job_id=job_id)
+            
+            assert result["cur_status"] == "running"
     
     def test_check_status_nonexistent_job(self):
         """Test checking status of non-existent job"""
@@ -120,9 +123,6 @@ class TestModalApp:
             "updated_at": "2024-01-01T00:00:00"
         })
         
-        # zip_path = temp_volume_dir / f"{job_id}.zip"
-        # with zipfile.ZipFile(zip_path, 'w') as zf:
-        #     zf.writestr("results.json", '{"test": "data"}')        
         expected_check_path = f"/results/{job_id}.zip"
         
         with patch('os.path.exists') as mock_exists:
@@ -135,8 +135,7 @@ class TestModalApp:
                 mock_zipfile.return_value = mock_zip_context
                 
                 with patch('shutil.copy') as mock_copy:
-                    with patch('os.remove') as mock_remove:                            
-                        result = download_result.local(job_id=job_id)
+                    result = download_result.local(job_id=job_id)
         
         assert isinstance(result, FileResponse)
         assert result.media_type == "application/zip"
@@ -144,7 +143,6 @@ class TestModalApp:
         
         # Cleanup
         mock_volume.commit.assert_called()        
-        mock_remove.assert_called_once_with(expected_check_path)
         assert job_id not in job_status_dict
         
     def test_download_result_file_not_found(self, temp_volume_dir, mock_volume):
@@ -488,7 +486,7 @@ class TestModalApp:
                 inference.local(job_id=job_id, request=sample_request, save_to_s3=False)
         
         assert excinfo.value.status_code == 400
-        assert excinfo.value.detail == "Failed to download link"
+        assert excinfo.value.detail == "Could not download video"
 
     def test_inference_pipeline_exception(self, temp_volume_dir, mock_volume, sample_request):
         """Test inference when pipeline raises an exception"""

@@ -26,7 +26,7 @@ INFRASTRUCTURE_CONFIG = {
         "max_containers": 2,
     },
     "prod": {
-        "gpu": "T4",
+        "gpu": "A10",
         "min_containers": 1,
         "max_containers": 20,
     }
@@ -54,16 +54,24 @@ S3_SECRET = modal.Secret.from_name(
 )
 
 # ====== IMAGE ======
+# Use NVIDIA TensorRT base to get TRT runtime + CUDA libs; install torch/ultralytics on top.
 image = (
-    modal.Image.debian_slim(python_version="3.10")
-    .apt_install(["libgl1-mesa-glx", "libglib2.0-0"])
+    modal.Image.from_registry("nvcr.io/nvidia/tensorrt:24.03-py3")
+    .apt_install(["libgl1-mesa-glx", "libglib2.0-0", "ffmpeg"])
+    .pip_install(
+        "torch",
+        "torchvision",
+        "torchaudio",
+        index_url="https://download.pytorch.org/whl/cu121",
+    )
     .pip_install([
-        "ultralytics==8.2.68",     # YOLOv8/v10 support
+        "ultralytics==8.2.68",     # YOLOv8/v10 support + TRT loading
         "opencv-python==4.10.0.84",
         "numpy>=1.24,<2.0",
         "pyyaml>=6.0",
         "onnx>=1.14.0", 
-        "fastapi", "boto3"
+        "fastapi",
+        "boto3"
     ])
     .add_local_dir(CODE_ROOT, remote_path="/root/a5")
 )
@@ -397,38 +405,82 @@ def inference(job_id: str, request: InferenceRequest, save_to_s3: bool = False):
     cur_config = Config(env=ENV)
     
     model_path = MOUNT_PATH / Path(cur_config.model_key)
-        
-    pipeline = InferencePipeline(
-        model_path=model_path / "best.pt",
-        fps=request.fps,
-        confidence_threshold=request.confidence_threshold, 
-        logger=logger, 
-        batch_size=min(100, request.batch_size)
-    )
-        
+    engine_path = model_path / "best.engine"
+    pt_path = model_path / "best.pt"
+    weights_path = engine_path if engine_path.exists() else pt_path
+    logger.info(f"Loading model from {weights_path}")
+
+    def build_pipeline(path):
+        return InferencePipeline(
+            model_path=path,
+            fps=request.fps,
+            confidence_threshold=request.confidence_threshold,
+            logger=logger,
+            batch_size=min(100, request.batch_size),
+        )
+
+    try:
+        pipeline = build_pipeline(weights_path)
+    except Exception as e:
+        if weights_path == engine_path and pt_path.exists():
+            logger.warning(f"Engine load failed during init ({e}); falling back to {pt_path}")
+            pipeline = build_pipeline(pt_path)
+            weights_path = pt_path
+        else:
+            raise
     video_id = f"{str(Path(cur_config.model_key).stem)}_{datetime.now().strftime('%Y_%m_%d_%H_%M_%S')}"
     
     try: 
-            res_dirs, res_json_path = pipeline.run_inference_on_video(
-                video_path=local_vid_path, 
-                video_id=video_id, 
-                s3_bucket=cur_config.s3_bucket if save_to_s3 else save_to_s3,
-                save_annotated_frames=True
-            )
+        # CHANGED: Now returns additional_files instead of res_json_path
+        res_dirs, additional_files = pipeline.run_inference_on_video(
+            video_path=local_vid_path, 
+            video_id=video_id, 
+            s3_bucket=cur_config.s3_bucket if save_to_s3 else save_to_s3,
+            save_annotated_frames=True
+        )
     except Exception as e: 
-        print("error!", e)
-        job_status_dict[job_id] = json.dumps({
-            "cur_status": "failed",
-            "cur_status_progress": 0,
-            "error": str(e),
-            "updated_at": datetime.now().isoformat()
-        })
-        raise HTTPException(status_code=500, detail=f"Exception occurred during video frame processing or model inference: {e}")
+        # If using engine and it failed during inference, retry with pt
+        if weights_path == engine_path and pt_path.exists():
+            logger.warning(f"Engine inference failed ({e}); retrying with {pt_path}")
+            fallback_pipeline = InferencePipeline(
+                model_path=pt_path,
+                fps=request.fps,
+                confidence_threshold=request.confidence_threshold, 
+                logger=logger, 
+                batch_size=min(100, request.batch_size)
+            )
+            try:
+                # CHANGED: Now returns additional_files
+                res_dirs, additional_files = fallback_pipeline.run_inference_on_video(
+                    video_path=local_vid_path, 
+                    video_id=video_id, 
+                    s3_bucket=cur_config.s3_bucket if save_to_s3 else save_to_s3,
+                    save_annotated_frames=True
+                )
+                weights_path = pt_path
+            except Exception as e2:
+                print("error!", e2)
+                job_status_dict[job_id] = json.dumps({
+                    "cur_status": "failed",
+                    "cur_status_progress": 0,
+                    "error": str(e2),
+                    "updated_at": datetime.now().isoformat()
+                })
+                raise HTTPException(status_code=500, detail=f"Exception occurred during video frame processing or model inference: {e2}")
+        else:
+            print("error!", e)
+            job_status_dict[job_id] = json.dumps({
+                "cur_status": "failed",
+                "cur_status_progress": 0,
+                "error": str(e),
+                "updated_at": datetime.now().isoformat()
+            })
+            raise HTTPException(status_code=500, detail=f"Exception occurred during video frame processing or model inference: {e}")
 
     zip_path = Path(f"/results/{job_id}.zip")
     logger.info("Started zipping results")  
-    try: zip_directory(res_dirs, [res_json_path], zip_path)
-
+    # CHANGED: Pass additional_files instead of [res_json_path]
+    try: zip_directory(res_dirs, additional_files, zip_path)
     except Exception as e: 
         job_status_dict[job_id] = json.dumps({
             "cur_status": "failed",
@@ -452,29 +504,3 @@ def inference(job_id: str, request: InferenceRequest, save_to_s3: bool = False):
         "updated_at": datetime.now().isoformat()
     })
     logger.info(f"[{job_id}] status set to completed")
-
-@app.function(volumes={"/results": results_volume})
-@modal.fastapi_endpoint(method="GET")
-def debug_list_volume_contents():
-    """Debug: List everything in the volume"""
-    import os
-    
-    if not os.path.exists("/results"):
-        return {"error": "/results doesn't exist", "exists": False}
-    
-    files = []
-    for filename in os.listdir("/results"):
-        filepath = os.path.join("/results", filename)
-        size = os.path.getsize(filepath) if os.path.isfile(filepath) else 0
-        files.append({
-            "name": filename,
-            "size": size,
-            "is_file": os.path.isfile(filepath)
-        })
-    
-    return {
-        "directory": "/results",
-        "exists": True,
-        "total_files": len(files),
-        "files": files
-    }
