@@ -4,7 +4,7 @@ This document provides an overview of the unit tests created for the training an
 
 ## Test Coverage Overview
 
-### 1. Modal Training Tests (`modal/tests/test_training.py`)
+### 1. Modal Training Tests (`model_training/tests/test_training.py`)
 
 Tests for the YOLO model training infrastructure on Modal.
 
@@ -54,7 +54,7 @@ Tests for the ETL pipeline that creates brand and image catalogues from datasets
 
 **Total Tests:** 33 test cases
 
-### 3. RL Judge Training Tests (`vlm_test/rl_judge/tests/test_train.py`)
+### 3. RL Judge Training Tests (`misc_old/vlm_test/rl_judge/tests/test_train.py`)
 
 Tests for the reinforcement learning judge training pipeline.
 
@@ -128,23 +128,23 @@ python -m pytest -v
 
 ```bash
 # Modal training tests (requires modal, ultralytics)
-python -m pytest modal/tests/test_training.py -v
+python -m pytest model_training/tests/test_training.py -v
 
 # Image/brand catalog tests (requires pandas, boto3)
-python -m pytest a5/pipelines/training_ingestion/tests/test_image_brand_catalog.py -v
+python -m pytest pipelines/data_ingestion/tests/test_image_brand_catalog.py -v
 
 # RL judge training tests (requires torch, tensorboard)
-python -m pytest vlm_test/rl_judge/tests/test_train.py -v
+python -m pytest misc_old/vlm_test/rl_judge/tests/test_train.py -v
 ```
 
 ### Running Specific Test Classes or Methods
 
 ```bash
 # Run a specific test class
-pytest modal/tests/test_training.py::TestTrainSpec
+pytest model_training/tests/test_training.py::TestTrainSpec
 
 # Run a specific test method
-pytest modal/tests/test_training.py::TestTrainSpec::test_train_spec_defaults
+pytest model_training/tests/test_training.py::TestTrainSpec::test_train_spec_defaults
 
 # Run tests matching a pattern
 pytest -k "test_load" -v
@@ -157,11 +157,16 @@ visight/
 ├── modal/
 │   └── tests/
 │       └── test_training.py              # YOLO training tests
-├── a5/
-│   └── pipelines/
-│       └── training_ingestion/
-│           └── tests/
-│               └── test_image_brand_catalog.py  # ETL pipeline tests
+├── pipelines/
+│   └── data_ingestion/
+│       └── tests/
+│           └── test_image_brand_catalog.py  # ETL pipeline tests
+│   └── inference/
+│       └── tests/
+│           └── test_modal_app.py 
+│           └── test_model_server.py 
+│           └── test_pipeline_remote.py 
+│           └── test_video_processor.py 
 ```
 
 ## Testing Patterns Used

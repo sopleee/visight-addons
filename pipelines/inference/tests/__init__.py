@@ -1,0 +1,3 @@
+import pipelines.inference.tests.test_pipeline_remote
+import pipelines.inference.tests.test_model_server
+import pipelines.inference.tests.test_modal_app
