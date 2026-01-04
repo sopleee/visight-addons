@@ -31,7 +31,7 @@ This project was developed in python 3.10.
 Initialize the appropriate development environment by setting the MODAL_ENV environment variable to prod or dev (by default is dev).
 
 Start the application server with: (after saving the fine-tuned model weights in tensorRT format to the appropriate paths)
-`modal deploy -m pipelines.inference.model_server
+```modal deploy -m pipelines.inference.model_server```
 
 Follow web/FRONTEND.md to start up the front-end server where .env.local endpoints are set to the modal application in the previous. 
 
@@ -39,8 +39,7 @@ NOTE: when rerunning the application after canceling, make sure to delete web/.n
 
 ## Sample endpoint requests to application server (Windows)
 Submit a new job with: 
-``` curl.exe -X POST https://MODALUSERNAME--visight-yolo-test-dev-submit-job.modal.run -H "Content-Type: application/json" `
->> -d '{\"video_url\": \"INSERT_VIDEO_URL\" }' ```
+``` curl.exe -X POST https://MODALUSERNAME--visight-yolo-test-dev-submit-job.modal.run -H "Content-Type: application/json" -d '{\"video_url\": \"INSERT_VIDEO_URL\" }' ```
 
 It outputs the job_id, which is needed to track the job's status and download the results after it completes. 
 
